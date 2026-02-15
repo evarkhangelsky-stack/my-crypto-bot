@@ -8,76 +8,78 @@ DS_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 bot = telebot.TeleBot(TOKEN)
 
-def get_kline_data(symbol="ETHUSDT", interval="1"):
-    """Получение свечей и расчет базовых индикаторов"""
-    try:
-        url = "https://api.bybit.com/v5/market/kline"
-        res = requests.get(url, params={"category": "linear", "symbol": symbol, "interval": interval, "limit": "50"}, timeout=10).json()
-        df = pd.DataFrame(res['result']['list'], columns=['ts', 'o', 'h', 'l', 'c', 'v', 'tv'])
-        df[['o', 'h', 'l', 'c', 'v']] = df[['o', 'h', 'l', 'c', 'v']].astype(float)
-        df = df.iloc[::-1].reset_index(drop=True)
-        
-        # Индикаторы для скальпа
-        df['rsi'] = ta.rsi(df['c'], length=14)
-        return {"price": df['c'].iloc[-1], "rsi": round(df['rsi'].iloc[-1], 2)}
-    except: return None
+# Список монет для мониторинга
+SYMBOLS = ["BTCUSDT", "ETHUSDT"]
 
-def get_orderbook_data(symbol="ETHUSDT"):
-    """Анализ стакана: дисбаланс сил"""
+def get_market_data(symbol):
     try:
-        url = "https://api.bybit.com/v5/market/orderbook"
-        res = requests.get(url, params={"category": "linear", "symbol": symbol, "limit": "50"}, timeout=10).json()
-        bids = sum([float(i[1]) for i in res['result']['b']]) # Объем на покупку
-        asks = sum([float(i[1]) for i in res['result']['a']]) # Объем на продажу
+        base_url = "https://api.bybit.com/v5/market"
+        # 1. Свечи 1м
+        k_res = requests.get(f"{base_url}/kline", params={"category":"linear","symbol":symbol,"interval":"1","limit":"50"}, timeout=10).json()
+        df = pd.DataFrame(k_res['result']['list'], columns=['ts','o','h','l','c','v','tv'])
+        df['c'] = df['c'].astype(float)
+        df = df.iloc[::-1]
+        rsi = ta.rsi(df['c'], length=14).iloc[-1]
+
+        # 2. Стакан
+        ob = requests.get(f"{base_url}/orderbook", params={"category":"linear","symbol":symbol,"limit":"25"}, timeout=10).json()
+        bids = sum([float(i[1]) for i in ob['result']['b']])
+        asks = sum([float(i[1]) for i in ob['result']['a']])
         imbalance = (bids / (bids + asks)) * 100
-        spread = float(res['result']['a'][0][0]) - float(res['result']['b'][0][0])
-        return {"imbalance": round(imbalance, 2), "spread": round(spread, 3)}
-    except: return None
 
-def get_ticker_data(symbol="ETHUSDT"):
-    """Funding и Open Interest"""
-    try:
-        url = "https://api.bybit.com/v5/market/tickers"
-        res = requests.get(url, params={"category": "linear", "symbol": symbol}, timeout=10).json()
-        t = res['result']['list'][0]
-        return {"oi": t['openInterest'], "funding": t['fundingRate'], "change": t['price24hPcnt']}
-    except: return None
+        # 3. Общие данные
+        t_res = requests.get(f"{base_url}/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
+        ticker = t_res['result']['list'][0]
+
+        return {
+            "symbol": symbol,
+            "price": df['c'].iloc[-1],
+            "rsi": round(rsi, 2),
+            "imbalance": round(imbalance, 2),
+            "oi": ticker['openInterest']
+        }
+    except Exception as e:
+        print(f"Ошибка сбора {symbol}: {e}")
+        return None
 
 if __name__ == "__main__":
-    print(">>> СКАНЕР ЗАПУЩЕН")
+    print(f">>> МОНИТОРИНГ {SYMBOLS} ЗАПУЩЕН")
+    last_signal_times = {s: 0 for s in SYMBOLS}
+    
     while True:
-        try:
-            # Сбор данных со всех уровней
-            m1 = get_kline_data(interval="1")
-            m5 = get_kline_data(interval="5")
-            m15 = get_kline_data(interval="15")
-            book = get_orderbook_data()
-            market = get_ticker_data()
-
-            if m1 and book and market:
-                # Математический фильтр для скальпа
-                signal_type = "NEUTRAL"
-                if m1['rsi'] < 30 and book['imbalance'] > 60: signal_type = "SCALP LONG"
-                if m1['rsi'] > 70 and book['imbalance'] < 40: signal_type = "SCALP SHORT"
-
-                report = (
-                    f"⚡️ **SCALP SCANNER (ETH)**\n"
-                    f"💵 Цена: `${m1['price']}` | Спред: `{book['spread']}`\n"
-                    f"📊 RSI: 1м:`{m1['rsi']}` | 5м:`{m5['rsi']}` | 15м:`{m15['rsi']}`\n"
-                    f"⚖️ Стакан: `Bids {book['imbalance']}% / Asks {100-book['imbalance']}%`\n"
-                    f"🎯 OI: `{market['oi']}` | Funding: `{market['funding']}`\n"
-                    f"🚨 Тех. сигнал: **{signal_type}**"
-                )
-
-                # Отправляем AI для подтверждения
-                prompt = f"Ты скальпер. Есть сигнал {signal_type}. Данные: {report}. Подтверждаешь вход? Ответ в 2 предложениях."
-                ai_res = requests.post("https://api.deepseek.com/chat/completions", 
-                    headers={"Authorization": f"Bearer {DS_KEY}"},
-                    json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]}, timeout=20).json()
-                
-                bot.send_message(CHAT_ID, report + "\n\n🧠 **AI Анализ:**\n" + ai_res['choices'][0]['message']['content'], parse_mode="Markdown")
+        for symbol in SYMBOLS:
+            data = get_market_data(symbol)
             
-            time.sleep(300) # Проверка каждые 5 минут для интрадея
-        except Exception as e:
-            print(f"Ошибка: {e}")
-            time.sleep(60)
+            if data:
+                # Математика сигнала
+                is_long = data['rsi'] < 30 and data['imbalance'] > 65
+                is_short = data['rsi'] > 70 and data['imbalance'] < 35
+                
+                current_time = time.time()
+                # Сигнал или отчет раз в 30 минут
+                if is_long or is_short or (current_time - last_signal_times[symbol] > 1800):
+                    
+                    status = "🟢 LONG" if is_long else "🔴 SHORT" if is_short else "⚪️ WAIT"
+                    
+                    prompt = f"Монета: {symbol}. Сигнал: {status}. RSI: {data['rsi']}, Imbalance: {data['imbalance']}%. Дай совет скальперу за 10 слов."
+                    
+                    try:
+                        ai_res = requests.post("https://api.deepseek.com/chat/completions", 
+                            headers={"Authorization": f"Bearer {DS_KEY}"},
+                            json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]}).json()
+                        advice = ai_res['choices'][0]['message']['content']
+                    except:
+                        advice = "AI временно недоступен."
+
+                    msg = (f"🚀 **{symbol} {status}**\n\n"
+                           f"💰 Цена: `${data['price']}`\n"
+                           f"📊 RSI: `{data['rsi']}` | Стакан: `{data['imbalance']}%` 📈\n"
+                           f"🎯 OI: `{data['oi']}`\n\n"
+                           f"🧠 **AI:** {advice}")
+                    
+                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+                    last_signal_times[symbol] = current_time
+            
+            time.sleep(5) # Короткая пауза между монетами, чтобы не спамить API
+
+        time.sleep(60) # Проверка всего списка раз в минуту
