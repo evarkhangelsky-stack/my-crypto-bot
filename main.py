@@ -7,12 +7,15 @@ DS_KEY = os.getenv("DEEPSEEK_API_KEY")
 
 def get_market_data():
     base = "https://fapi.binance.com"
-    # Свечи
-    r = requests.get(f"{base}/fapi/v1/klines?symbol=ETHUSDT&interval=5m&limit=50").json()
+    # Запрашиваем 100 свечей, чтобы RSI точно рассчитался
+    r = requests.get(f"{base}/fapi/v1/klines?symbol=ETHUSDT&interval=5m&limit=100").json()
     df = pd.DataFrame(r, columns=['ts','o','h','l','c','v','cts','qav','nt','tb','tq','i'])
     df['c'] = df['c'].astype(float)
     
-    # RSI вручную (чтобы не зависеть от библиотек)
+    if len(df) < 20:
+        return None, None, None
+
+    # RSI вручную
     delta = df['c'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -32,21 +35,25 @@ def ask_deepseek(txt):
         "messages": [{"role": "user", "content": f"Кратко проанализируй ETH: {txt}"}]
     }
     try:
-        res = requests.post(url, json=data, headers=headers, timeout=10)
+        res = requests.post(url, json=data, headers=headers, timeout=15)
         return res.json()['choices'][0]['message']['content']
-    except:
-        return "DeepSeek временно недоступен"
+    except Exception as e:
+        return f"DeepSeek недоступен: {str(e)}"
 
 if __name__ == "__main__":
-    print("Запуск мониторинга...")
+    print("Мониторинг запущен...")
     while True:
         try:
             price, rsi, oi = get_market_data()
-            # Отправляем всегда для проверки связи
-            report = f"Цена: {price}, RSI: {rsi:.2f}, OI: {oi}"
-            ai_verdict = ask_deepseek(report)
-            bot.send_message(CHAT_ID, f"📊 **ETH REPORT**\n{report}\n\n🧠 **AI:** {ai_verdict}")
-            time.sleep(300)
+            
+            if price is not None:
+                report = f"Цена: {price}, RSI: {rsi:.2f}, OI: {oi}"
+                ai_verdict = ask_deepseek(report)
+                bot.send_message(CHAT_ID, f"📊 **ETH REPORT**\n{report}\n\n🧠 **AI:** {ai_verdict}")
+                print("Отчет отправлен в Телеграм")
+            
+            time.sleep(300) # Проверка каждые 5 минут
         except Exception as e:
-            print(f"Ошибка: {e}")
+            print(f"Ошибка цикла: {e}")
             time.sleep(60)
+            
