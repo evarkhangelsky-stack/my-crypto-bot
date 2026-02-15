@@ -1,59 +1,71 @@
 import os, telebot, requests, time
 import pandas as pd
 
-bot = telebot.TeleBot(os.getenv("TELEGRAM_BOT_TOKEN"))
+# Загрузка ключей
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 DS_KEY = os.getenv("DEEPSEEK_API_KEY")
 
+bot = telebot.TeleBot(TOKEN)
+
 def get_market_data():
     base = "https://fapi.binance.com"
-    # Запрашиваем 100 свечей, чтобы RSI точно рассчитался
-    r = requests.get(f"{base}/fapi/v1/klines?symbol=ETHUSDT&interval=5m&limit=100").json()
+    # Берем 100 свечей для стабильного расчета RSI
+    url = f"{base}/fapi/v1/klines?symbol=ETHUSDT&interval=5m&limit=100"
+    r = requests.get(url).json()
+    
     df = pd.DataFrame(r, columns=['ts','o','h','l','c','v','cts','qav','nt','tb','tq','i'])
     df['c'] = df['c'].astype(float)
     
-    if len(df) < 20:
+    # Защита: если данных вдруг меньше нужного для RSI
+    if len(df) < 30:
         return None, None, None
 
-    # RSI вручную
+    # Считаем RSI вручную (без лишних библиотек)
     delta = df['c'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     
-    # OI
+    # Получаем Open Interest
     oi_r = requests.get(f"{base}/fapi/v1/openInterest?symbol=ETHUSDT").json()
+    oi = float(oi_r['openInterest'])
     
-    return df['c'].iloc[-1], rsi.iloc[-1], float(oi_r['openInterest'])
+    return df['c'].iloc[-1], rsi.iloc[-1], oi
 
-def ask_deepseek(txt):
+def ask_deepseek(text):
     url = "https://api.deepseek.com/chat/completions"
     headers = {"Authorization": f"Bearer {DS_KEY}", "Content-Type": "application/json"}
-    data = {
+    payload = {
         "model": "deepseek-chat",
-        "messages": [{"role": "user", "content": f"Кратко проанализируй ETH: {txt}"}]
+        "messages": [
+            {"role": "system", "content": "Ты эксперт-трейдер. Проанализируй данные ETH и дай очень краткий совет."},
+            {"role": "user", "content": text}
+        ]
     }
     try:
-        res = requests.post(url, json=data, headers=headers, timeout=15)
+        res = requests.post(url, json=payload, headers=headers, timeout=15)
         return res.json()['choices'][0]['message']['content']
     except Exception as e:
-        return f"DeepSeek недоступен: {str(e)}"
+        return f"Ошибка ИИ: {str(e)}"
 
 if __name__ == "__main__":
-    print("Мониторинг запущен...")
+    print("Бот запущен и мониторит ETH...")
     while True:
         try:
-            price, rsi, oi = get_market_data()
+            price, rsi_val, oi_val = get_market_data()
             
             if price is not None:
-                report = f"Цена: {price}, RSI: {rsi:.2f}, OI: {oi}"
-                ai_verdict = ask_deepseek(report)
-                bot.send_message(CHAT_ID, f"📊 **ETH REPORT**\n{report}\n\n🧠 **AI:** {ai_verdict}")
-                print("Отчет отправлен в Телеграм")
+                # Сейчас шлем всегда, чтобы убедиться в работе. 
+                # Потом поставим фильтр на аномалии.
+                report = f"ETH: ${price}, RSI: {rsi_val:.2f}, OI: {oi_val}"
+                ai_advice = ask_deepseek(report)
+                
+                bot.send_message(CHAT_ID, f"📊 **ОТЧЕТ ETH**\n{report}\n\n🧠 **DeepSeek:**\n{ai_advice}")
+                print("Сигнал отправлен!")
             
-            time.sleep(300) # Проверка каждые 5 минут
+            time.sleep(300) # Проверка раз в 5 минут
         except Exception as e:
-            print(f"Ошибка цикла: {e}")
+            print(f"Ошибка в цикле: {e}")
             time.sleep(60)
-            
