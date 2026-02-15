@@ -1,6 +1,6 @@
 import os, telebot, requests, time
 
-# Конфигурация
+# Загрузка ключей
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 DS_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -9,80 +9,58 @@ CG_KEY = os.getenv("COINGLASS_API_KEY")
 bot = telebot.TeleBot(TOKEN)
 
 def get_bybit_data():
-    """Сбор данных с Bybit: Цена, RSI, Стакан, OI"""
     try:
-        base_url = "https://api.bybit.com/v5/market"
-        symbol = "ETHUSDT"
-        # Свечи для RSI
-        k_res = requests.get(f"{base_url}/kline", params={"category":"linear","symbol":symbol,"interval":"5","limit":"50"}, timeout=10).json()
+        url = "https://api.bybit.com/v5/market/tickers"
+        # Получаем данные тикера для цены и OI
+        res = requests.get(url, params={"category":"linear","symbol":"ETHUSDT"}, timeout=10).json()
+        t = res['result']['list'][0]
+        
+        # Получаем свечи для RSI
+        k_url = "https://api.bybit.com/v5/market/kline"
+        k_res = requests.get(k_url, params={"category":"linear","symbol":"ETHUSDT","interval":"5","limit":"20"}, timeout=10).json()
         closes = [float(c[4]) for c in k_res['result']['list'][::-1]]
         
-        # Чистый расчет RSI
+        # Упрощенный RSI
         diffs = [closes[i] - closes[i-1] for i in range(1, len(closes))]
         avg_gain = sum([d for d in diffs[-14:] if d > 0]) / 14
         avg_loss = sum([-d for d in diffs[-14:] if d < 0]) / 14
         rsi = 100 - (100 / (1 + (avg_gain / (avg_loss or 0.001))))
-        
-        # Стакан
-        ob = requests.get(f"{base_url}/orderbook", params={"category":"linear","symbol":symbol,"limit":"50"}, timeout=10).json()
-        bids = sum([float(b[1]) for b in ob['result']['b']])
-        asks = sum([float(a[1]) for a in ob['result']['a']])
-        
-        # Тикер (Цена, OI, Funding)
-        t_res = requests.get(f"{base_url}/tickers", params={"category":"linear","symbol":symbol}, timeout=10).json()
-        t = t_res['result']['list'][0]
-        
-        return {
-            "price": float(t['lastPrice']),
-            "rsi": round(rsi, 2),
-            "imbalance": round((bids / (bids + asks)) * 100, 2),
-            "oi": t['openInterest'],
-            "funding": t['fundingRate']
-        }
+
+        return {"price": float(t['lastPrice']), "rsi": round(rsi, 2), "oi": t['openInterest']}
     except Exception as e:
-        print(f"Bybit error: {e}")
+        print(f"Bybit Error: {e}")
         return None
 
-def get_coinglass_data():
-    """Данные CoinGlass: Ликвидации и Long/Short Ratio"""
+def get_coinglass_simple():
+    """Более надежный запрос к CoinGlass для Free API"""
     try:
         headers = {"accept": "application/json", "CG-API-KEY": CG_KEY}
-        # Ликвидации ETH за час
-        res_liq = requests.get("https://open-api.coinglass.com/public/v2/liquidation_info?symbol=ETH", headers=headers, timeout=10).json()
-        # Long/Short Ratio (агрегированный)
-        res_ls = requests.get("https://open-api.coinglass.com/public/v2/long_short?time_type=h1&symbol=ETH", headers=headers, timeout=10).json()
-        
-        return {
-            "liq_buy": res_liq['data'][0]['buyVol'] if res_liq.get('data') else 0,
-            "liq_sell": res_liq['data'][0]['sellVol'] if res_liq.get('data') else 0,
-            "ls_ratio": res_ls['data'][0]['v'] if res_ls.get('data') else 1.0
-        }
+        # Используем эндпоинт, который чаще всего доступен бесплатно
+        url = "https://open-api.coinglass.com/public/v2/long_short?time_type=h1&symbol=ETH"
+        res = requests.get(url, headers=headers, timeout=10).json()
+        # Если данные есть, берем первый элемент
+        if res.get('data') and len(res['data']) > 0:
+            return {"ls_ratio": res['data'][0]['v']}
+        return {"ls_ratio": "N/A"}
     except:
-        return {"liq_buy": 0, "liq_sell": 0, "ls_ratio": 1.0}
-
-def get_binance_price():
-    """Цена с Binance (бесплатно, без ключа)"""
-    try:
-        res = requests.get("https://api.binance.com/api/3/ticker/price?symbol=ETHUSDT", timeout=10).json()
-        return float(res['price'])
-    except:
-        return None
+        return {"ls_ratio": "N/A"}
 
 if __name__ == "__main__":
-    print(">>> ЗАПУСК ВСЕВИДЯЩЕГО ОКА (BYBIT + BINANCE + COINGLASS)")
+    print(">>> БОТ ЗАПУЩЕН И ГОТОВ К РАБОТЕ")
+    # Отправим тестовое сообщение сразу при запуске
+    bot.send_message(CHAT_ID, "🚀 Бот успешно запущен и начинает мониторинг Bybit + CoinGlass!")
+    
     while True:
         bb = get_bybit_data()
-        cg = get_coinglass_data()
-        bin_p = get_binance_price()
-
-        if bb and bin_p:
-            diff = round(bb['price'] - bin_p, 2)
+        cg = get_coinglass_simple()
+        
+        if bb:
+            # Логика определения сетапа
+            signal = "LONG" if bb['rsi'] < 30 else "SHORT" if bb['rsi'] > 70 else "NEUTRAL"
             
-            # Промпт для AI теперь включает данные с трех площадок
-            prompt = (f"ETH Анализ: Bybit ${bb['price']}, Binance ${bin_p}. RSI: {bb['rsi']}, "
-                      f"Ликвидации лонгов: ${cg['liq_sell']}, Ликвидации шортов: ${cg['liq_buy']}. "
-                      f"Long/Short Ratio: {cg['ls_ratio']}. Дай краткий совет трейдеру.")
-
+            prompt = (f"ETH {signal} по {bb['price']}. RSI: {bb['rsi']}, Long/Short: {cg['ls_ratio']}. "
+                      f"Дай прогноз за 10 слов.")
+            
             try:
                 ai_res = requests.post("https://api.deepseek.com/chat/completions", 
                     headers={"Authorization": f"Bearer {DS_KEY}"},
@@ -90,17 +68,16 @@ if __name__ == "__main__":
                     timeout=15).json()
                 advice = ai_res['choices'][0]['message']['content']
             except:
-                advice = "DeepSeek анализирует рыночную ситуацию..."
+                advice = "AI анализирует график..."
 
-            msg = (f"🛸 **ETH GLOBAL DATA**\n\n"
-                   f"💵 Bybit: `${bb['price']}` (Binance Diff: `{diff}`)\n"
-                   f"🔥 Liquidation (1h): 🔴 `${cg['liq_sell']}` | 🟢 `${cg['liq_buy']}`\n"
+            msg = (f"💎 **ETH MONITOR**\n\n"
+                   f"💵 Price: `${bb['price']}`\n"
+                   f"📊 RSI (5m): `{bb['rsi']}`\n"
                    f"⚖️ L/S Ratio: `{cg['ls_ratio']}`\n"
-                   f"📊 RSI: `{bb['rsi']}` | Стакан: `{bb['imbalance']}%` 📈\n"
-                   f"🎯 OI: `{bb['oi']}` | Funding: `{bb['funding']}`\n\n"
+                   f"🎯 OI: `{bb['oi']}`\n\n"
                    f"🧠 **AI:** {advice}")
             
             bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-            print(f">>> Отчет отправлен: {bb['price']}")
+            print(f">>> Сообщение отправлено: {bb['price']}")
         
-        time.sleep(300) # Проверка раз в 5 минут
+        time.sleep(120) # Проверка каждые 2 минуты
