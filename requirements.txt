@@ -1,3 +1,5 @@
-pyTelegramBotAPI
 requests
+numpy
 pandas
+pandas-ta
+pyTelegramBotAPI
