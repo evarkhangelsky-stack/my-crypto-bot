@@ -54,32 +54,46 @@ class TechnicalAnalyzer:
     def prepare_df(self):
         if not self.market: return None
         df = pd.DataFrame(self.market['klines'], columns=['ts', 'o', 'h', 'l', 'c', 'v', 't'])
-        for col in ['o', 'h', 'l', 'c', 'v']: df[col] = pd.to_numeric(df[col])
+        for col in ['o', 'h', 'l', 'c', 'v']: 
+            df[col] = pd.to_numeric(df[col])
         return df
 
     def calculate(self):
         df = self.prepare_df()
-        if df is None: return None
+        if df is None or len(df) < 30: return None # Проверка на достаточность данных
+        
         res = {'price': df['c'].iloc[-1]}
+        
+        # Трендовые
         res['ema20'] = ta.ema(df['c'], length=20).iloc[-1]
         res['ema50'] = ta.ema(df['c'], length=50).iloc[-1]
-        res['ema200'] = ta.ema(df['c'], length=200).iloc[-1]
+        res['ema200'] = ta.ema(df['c'], length=200).iloc[-1] if len(df) >= 200 else res['ema50']
         res['vwap'] = (df['v'] * (df['h'] + df['l'] + df['c']) / 3).sum() / df['v'].sum()
+        
+        # Осцилляторы
         res['rsi'] = ta.rsi(df['c'], length=14).iloc[-1]
         macd = ta.macd(df['c'])
-        res['macd_h'] = macd['MACDh_12_26_9'].iloc[-1]
+        res['macd_h'] = macd.iloc[-1, 1] # Берем вторую колонку (гистограмму) напрямую
+        
+        # Волатильность (Исправленный блок)
         bb = ta.bbands(df['c'], length=20, std=2)
-        res['bb_up'], res['bb_low'] = bb['BBU_20_2.0'].iloc[-1], bb['BBL_20_2.0'].iloc[-1]
+        # Вместо имен 'BBU_20_2.0' берем по индексу: 0 - нижняя, 1 - средняя, 2 - верхняя
+        res['bb_up'] = bb.iloc[-1, 2]
+        res['bb_low'] = bb.iloc[-1, 0]
+        
         res['atr'] = ta.atr(df['h'], df['l'], df['c'], length=14).iloc[-1]
-        res['adx'] = ta.adx(df['h'], df['l'], df['c'], length=14)['ADX_14'].iloc[-1]
+        res['adx'] = ta.adx(df['h'], df['l'], df['c'], length=14).iloc[-1, 0]
+        
         return res
 
     def analyze_orderbook(self):
-        if not self.market: return 0.5
-        ob = self.market['orderbook']
-        bids = sum([float(i[1]) for i in ob['b']])
-        asks = sum([float(i[1]) for i in ob['a']])
-        return bids / (bids + asks)
+        try:
+            if not self.market or 'orderbook' not in self.market: return 0.5
+            ob = self.market['orderbook']
+            bids = sum([float(i[1]) for i in ob['b']])
+            asks = sum([float(i[1]) for i in ob['a']])
+            return bids / (bids + asks) if (bids + asks) > 0 else 0.5
+        except: return 0.5
 
 # --- [БЛОК 4-5: SMART ANALYST & AI] ---
 class SmartAnalyst:
