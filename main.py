@@ -1,7 +1,6 @@
-import os, telebot, requests, time, numpy as np
-from threading import Thread
+import os, requests, numpy as np, pandas as pd, pandas_ta as ta, telebot, time
 
-# --- КРЕДЕНШИНАЛЫ (Railway Env) ---
+# --- [CONFIG] ---
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 DS_KEY = os.getenv("DEEPSEEK_API_KEY")
@@ -9,125 +8,190 @@ CG_KEY = os.getenv("COINGLASS_API_KEY")
 CP_KEY = os.getenv("CRYPTOPANIC_API_KEY")
 bot = telebot.TeleBot(TOKEN)
 
-def get_market_analysis():
-    try:
-        # --- 1. ЯВНЫЙ ЗАХВАТ ДАННЫХ (ВСЕ РЕСУРСЫ) ---
-        b_base = "https://api.bybit.com/v5/market"
-        # Bybit: Свечи, Тикер (Фандинг), Стакан
-        c_raw = requests.get(f"{b_base}/kline", params={"category":"linear","symbol":"ETHUSDT","interval":"15","limit":"200"}).json()
-        t_raw = requests.get(f"{b_base}/tickers", params={"category":"linear","symbol":"ETHUSDT"}).json()
-        o_raw = requests.get(f"{b_base}/orderbook", params={"category":"linear","symbol":"ETHUSDT","limit":"50"}).json()
-        
-        # Coinglass: Агрегированный Long/Short и OI
-        cg_headers = {"accept": "application/json", "CG-API-KEY": CG_KEY}
-        ls_req = requests.get("https://open-api.coinglass.com/public/v2/long_short?time_type=h1&symbol=ETH", headers=cg_headers).json()
-        
-        # CryptoPanic: Новости
-        cp_req = requests.get(f"https://cryptopanic.com/api/v1/posts/?auth_token={CP_KEY}&currencies=ETH&filter=hot").json()
+# --- [БЛОК 1: СБОР ДАННЫХ] ---
+class DataCollector:
+    def __init__(self, symbol="ETHUSDT"):
+        self.symbol = symbol
+        self.coin = symbol.replace("USDT", "")
 
-        # --- 2. ОБРАБОТКА И МАТЕМАТИКА ---
-        klines = c_raw['result']['list'][::-1]
-        closes = np.array([float(x[4]) for x in klines])
-        highs, lows = np.array([float(x[2]) for x in klines]), np.array([float(x[3]) for x in klines])
-        vols = np.array([float(x[5]) for x in klines])
+    def get_bybit_market_data(self):
+        try:
+            url = "https://api.bybit.com/v5/market"
+            k_res = requests.get(f"{url}/kline", params={"category": "linear", "symbol": self.symbol, "interval": "15", "limit": 200}, timeout=10).json()
+            klines = k_res['result']['list'][::-1]
+            t_res = requests.get(f"{url}/tickers", params={"category": "linear", "symbol": self.symbol}, timeout=10).json()
+            ticker = t_res['result']['list'][0]
+            o_res = requests.get(f"{url}/orderbook", params={"category": "linear", "symbol": self.symbol, "limit": 50}, timeout=10).json()
+            return {"klines": klines, "ticker": ticker, "orderbook": o_res['result']}
+        except Exception as e:
+            print(f"Ошибка Bybit: {e}"); return None
+
+    def get_coinglass_data(self):
+        if not CG_KEY: return None
+        try:
+            headers = {"accept": "application/json", "CG-API-KEY": CG_KEY}
+            res = requests.get(f"https://open-api.coinglass.com/public/v2/long_short?time_type=h1&symbol={self.coin}", headers=headers, timeout=10).json()
+            return res.get('data', [{}])[0]
+        except Exception as e:
+            print(f"Ошибка Coinglass: {e}"); return None
+
+    def get_cryptopanic_news(self):
+        if not CP_KEY: return []
+        try:
+            res = requests.get(f"https://cryptopanic.com/api/v1/posts/?auth_token={CP_KEY}&currencies={self.coin}&kind=news&filter=hot", timeout=10).json()
+            return res.get('results', [])[:5]
+        except Exception as e:
+            print(f"Ошибка News: {e}"); return []
+
+    def collect_all(self):
+        return {"market": self.get_bybit_market_data(), "blockchain": self.get_coinglass_data(), "news": self.get_cryptopanic_news()}
+
+# --- [БЛОК 2-3: АНАЛИЗАТОР (ИНДИКАТОРЫ + МАТЕМАТИКА)] ---
+class TechnicalAnalyzer:
+    def __init__(self, raw_bundle):
+        self.market = raw_bundle.get('market')
         
-        # Индикаторы (Full Stack)
-        def ema(data, n):
-            a = 2 / (n + 1)
-            res = [data[0]]
-            for x in data[1:]: res.append(res[-1] + a * (x - res[-1]))
-            return np.array(res)
+    def prepare_df(self):
+        if not self.market: return None
+        df = pd.DataFrame(self.market['klines'], columns=['ts', 'o', 'h', 'l', 'c', 'v', 't'])
+        for col in ['o', 'h', 'l', 'c', 'v']: df[col] = pd.to_numeric(df[col])
+        return df
 
-        ema20, ema50, ema200 = ema(closes, 20)[-1], ema(closes, 50)[-1], ema(closes, 200)[-1]
-        vwap = np.sum(closes * vols) / np.sum(vols)
-        atr = np.mean(highs[-14:] - lows[-14:])
+    def calculate(self):
+        df = self.prepare_df()
+        if df is None: return None
+        res = {'price': df['c'].iloc[-1]}
+        res['ema20'] = ta.ema(df['c'], length=20).iloc[-1]
+        res['ema50'] = ta.ema(df['c'], length=50).iloc[-1]
+        res['ema200'] = ta.ema(df['c'], length=200).iloc[-1]
+        res['vwap'] = (df['v'] * (df['h'] + df['l'] + df['c']) / 3).sum() / df['v'].sum()
+        res['rsi'] = ta.rsi(df['c'], length=14).iloc[-1]
+        macd = ta.macd(df['c'])
+        res['macd_h'] = macd['MACDh_12_26_9'].iloc[-1]
+        bb = ta.bbands(df['c'], length=20, std=2)
+        res['bb_up'], res['bb_low'] = bb['BBU_20_2.0'].iloc[-1], bb['BBL_20_2.0'].iloc[-1]
+        res['atr'] = ta.atr(df['h'], df['l'], df['c'], length=14).iloc[-1]
+        res['adx'] = ta.adx(df['h'], df['l'], df['c'], length=14)['ADX_14'].iloc[-1]
+        return res
+
+    def analyze_orderbook(self):
+        if not self.market: return 0.5
+        ob = self.market['orderbook']
+        bids = sum([float(i[1]) for i in ob['b']])
+        asks = sum([float(i[1]) for i in ob['a']])
+        return bids / (bids + asks)
+
+# --- [БЛОК 4-5: SMART ANALYST & AI] ---
+class SmartAnalyst:
+    def __init__(self, tech_data, raw_bundle):
+        self.tech, self.blockchain, self.news = tech_data, raw_bundle.get('blockchain'), raw_bundle.get('news')
+
+    def analyze_all(self):
+        rep = {'ls_ratio': float(self.blockchain.get('v', 1.0)) if self.blockchain else 1.0}
+        bull_w = ['buy', 'pump', 'growth', 'surge', 'bullish', 'support']
+        score = 0
+        titles = ""
+        for n in self.news:
+            titles += n['title'] + " | "
+            if any(w in n['title'].lower() for w in bull_w): score += 1
+        rep['sentiment'] = "Positive" if score > 0 else "Neutral/Negative"
+        rep['news_summary'] = titles[:200]
         
-        # RSI
-        diff = np.diff(closes)
-        rsi = 100 - (100 / (1 + (np.mean(diff[diff>0]) / (abs(np.mean(diff[diff<0])) + 1e-5))))
+        prompt = f"ETH:{self.tech['price']}. RSI:{round(self.tech['rsi'],1)}, Sent:{rep['sentiment']}. Pro assessment 15 words."
+        try:
+            res = requests.post("https://api.deepseek.com/chat/completions", headers={"Authorization": f"Bearer {DS_KEY}"},
+                               json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]}, timeout=10).json()
+            rep['ai_verdict'] = res['choices'][0]['message']['content']
+        except: rep['ai_verdict'] = "AI Offline."
+        return rep
+
+# --- [БЛОК 6: ГРАФИКА (ГЛАЗА БОТА)] ---
+class ChartGeometry:
+    def __init__(self, raw_bundle):
+        m = raw_bundle.get('market', {})
+        self.klines = m.get('klines', [])
+        if self.klines:
+            self.c = np.array([float(x[4]) for x in self.klines])
+            self.h = np.array([float(x[2]) for x in self.klines])
+            self.l = np.array([float(x[3]) for x in self.klines])
+
+    def detect_structure(self):
+        if len(self.c) < 50: return "Unknown"
+        h, l = max(self.h[-20:-1]), min(self.l[-20:-1])
+        if self.c[-1] > h: return "BOS Bullish"
+        if self.c[-1] < l: return "BOS Bearish"
+        return "Range"
+
+    def find_patterns(self):
+        if len(self.c) < 60: return "Neutral"
+        h1, h2 = max(self.h[-40:-20]), max(self.h[-20:])
+        if abs(h1 - h2) / h1 < 0.002: return "Double Top"
+        l1, l2 = min(self.l[-40:-20]), min(self.l[-20:])
+        if abs(l1 - l2) / l1 < 0.002: return "Double Bottom"
+        return "Neutral"
+
+    def get_sr_levels(self):
+        all_p = np.concatenate([self.h[-100:], self.l[-100:]])
+        lvls = [round(p, 2) for p in all_p if np.sum(np.abs(all_p - p) / p < 0.001) > 3]
+        return sorted(list(set(lvls)))[-3:]
+
+# --- [БЛОК СТРАТЕГИИ] ---
+class StrategyManager:
+    def __init__(self, tech, struct, smart):
+        self.t, self.s, self.a = tech, struct, smart
         
-        # Bollinger Bands
-        std = np.std(closes[-20:])
-        up_bb, lw_bb = np.mean(closes[-20:]) + (std * 2.1), np.mean(closes[-20:]) - (std * 2.1)
+    def calculate_score(self):
+        sc = 0
+        if "Bullish" in self.s['structure']: sc += 3
+        if "Bearish" in self.s['structure']: sc -= 3
+        if self.t['price'] > self.t['ema200']: sc += 1
+        if 30 < self.t['rsi'] < 55: sc += 1
+        if self.a['ls_ratio'] < 0.95: sc += 2
+        if self.a['sentiment'] == "Positive": sc += 1
+        return sc
 
-        # ADX (Сила тренда)
-        adx = np.mean(np.abs(highs[-14:] - lows[-14:])) 
+    def generate_setup(self):
+        sc = self.calculate_score()
+        side = "LONG" if sc >= 5 else "SHORT" if sc <= -5 else None
+        if not side: return {"side": None}
+        atr = self.t['atr']
+        sl = round(self.t['price'] - (atr*2.5) if side=="LONG" else self.t['price'] + (atr*2.5), 2)
+        tp = round(self.t['price'] + (atr*5) if side=="LONG" else self.t['price'] - (atr*5), 2)
+        return {"side": side, "entry": self.t['price'], "sl": sl, "tp": tp, "score": sc}
 
-        # Данные из тикера и Coinglass
-        ticker_data = t_raw['result']['list'][0]
-        oi_val = float(ticker_data['openInterestValue']) / 1e6
-        funding = float(ticker_data['fundingRate'])
-        ls_ratio = ls_req.get('data', [{}])[0].get('v', 1.0)
-        
-        # Стакан (Imbalance)
-        bids = sum([float(b[1]) for b in o_raw['result']['b']])
-        asks = sum([float(a[1]) for a in o_raw['result']['a']])
-        imbalance = bids / (bids + asks)
-        
-        # Новости
-        news_titles = " | ".join([n['title'] for n in cp_req['results'][:3]])
-
-        return {
-            "p": closes[-1], "vwap": vwap, "ema200": ema200, "rsi": rsi, "adx": adx,
-            "bb": (up_bb, lw_bb), "oi": oi_val, "fund": funding, "ls": ls_ratio,
-            "imb": imbalance, "news": news_titles, "atr": atr,
-            "sup": np.min(lows[-50:]), "res": np.max(highs[-50:])
-        }
-    except Exception as e:
-        print(f"Ошибка сбора данных: {e}"); return None
-
-# Команда проверки статуса
-@bot.message_handler(commands=['status'])
-def send_status(message):
-    m = get_market_analysis()
-    if m:
-        bot.reply_to(message, f"📊 **STATUS:**\nPrice: `{m['p']}`\nOI: `${m['oi']}M` | L/S: `{m['ls']}`\nFunding: `{m['fund']}`\nImbalance: `{round(m['imb'],2)}`", parse_mode="Markdown")
-
-def trading_logic():
-    bot.send_message(CHAT_ID, "🛠 **TITAN TERMINAL v25.0** СЕТЬ АКТИВНА.\nВсе ресурсы (Bybit/Coinglass/News) и стратегии подключены.")
+# --- [ГЛАВНЫЙ ЦИКЛ] ---
+def main_run():
+    collector = DataCollector("ETHUSDT")
+    bot.send_message(CHAT_ID, "🔮 **TITAN MONOLITH v2.0** АКТИВИРОВАН\nМониторинг ETH (15m/Bybit/Coinglass/News)")
     while True:
-        m = get_market_analysis()
-        if m:
-            side, strat = None, None
+        try:
+            raw = collector.collect_all()
+            if not raw['market']: time.sleep(30); continue
             
-            # --- СТРАТЕГИЧЕСКИЙ МОДУЛЬ ---
-            # 1. TREND MOMENTUM (Используем ADX и VWAP)
-            if m['adx'] > 18:
-                if m['p'] > m['vwap'] and m['imb'] > 0.54: side, strat = "LONG", "Trend Breakout"
-                elif m['p'] < m['vwap'] and m['imb'] < 0.46: side, strat = "SHORT", "Trend Breakdown"
+            ana = TechnicalAnalyzer(raw)
+            tech = ana.calculate()
+            imb = ana.analyze_orderbook()
             
-            # 2. RANGE TRADING (Боковик - Bollinger)
-            elif m['adx'] <= 18:
-                if m['p'] >= m['bb'][0] * 0.999 and m['rsi'] > 65: side, strat = "SHORT", "Range Reversal"
-                elif m['p'] <= m['bb'][1] * 1.001 and m['rsi'] < 35: side, strat = "LONG", "Range Reversal"
-
-            # 3. LIQUIDITY HUNT (По данным Coinglass L/S)
-            if not side:
-                if m['ls'] < 0.88 and m['imb'] > 0.58: side, strat = "LONG", "Liquidity Squeeze"
-                elif m['ls'] > 1.35 and m['imb'] < 0.42: side, strat = "SHORT", "Long Liquidation"
-
-            if side:
-                sl = round(m['p'] - m['atr']*2.5 if side == "LONG" else m['p'] + m['atr']*2.5, 2)
-                tp = round(m['p'] + m['atr']*5.5 if side == "LONG" else m['p'] - m['atr']*5.5, 2)
-                
-                # AI Verdict
-                prompt = (f"Analyze {side}. ETH:{m['p']}, OI:${m['oi']}M, Funding:{m['fund']}, "
-                          f"L/S:{m['ls']}, Imb:{m['imb']}, News:{m['news']}. Short verdict.")
-                try:
-                    res = requests.post("https://api.deepseek.com/chat/completions", 
-                                        headers={"Authorization": f"Bearer {DS_KEY}"},
-                                        json={"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]}).json()
-                    ai_advice = res['choices'][0]['message']['content']
-                except: ai_advice = "Confirmed by technical and fundamental metrics."
-
-                bot.send_message(CHAT_ID, f"🚨 **{side} SIGNAL: {strat}**\n\n📥 Entry: `{m['p']}`\n🛡 SL: `{sl}` | 🎯 TP: `{tp}`\n\n"
-                                          f"📊 **Data Stack:**\n- OI: `${m['oi']}M` | Funding: `{m['fund']}`\n"
-                                          f"- L/S Ratio: `{m['ls']}` | Imbalance: `{m['imb']}`\n"
-                                          f"- RSI: `{round(m['rsi'],1)}` | ADX: `{round(m['adx'],1)}` \n\n"
-                                          f"📰 **News:** {m['news']}\n\n🧠 **AI:** {ai_advice}", parse_mode="Markdown")
+            geo = ChartGeometry(raw)
+            struct = {'structure': geo.detect_structure(), 'patterns': geo.find_patterns()}
+            lvls = geo.get_sr_levels()
+            
+            smart = SmartAnalyst(tech, raw)
+            smart.tech['imb'] = imb
+            ai_data = smart.analyze_all()
+            
+            setup = StrategyManager(tech, struct, ai_data).generate_setup()
+            
+            if setup['side']:
+                msg = (f"🚨 **{setup['side']} SIGNAL**\n━━━━━━━━━━━━\n🎯 Entry: `{setup['entry']}`\n🛡 SL: `{setup['sl']}` | 💰 TP: `{setup['tp']}`\n"
+                       f"📊 Score: `{setup['score']}/10` | RSI: `{round(tech['rsi'],1)}` | ADX: `{round(tech['adx'],1)}` \n"
+                       f"🧠 **AI:** _{ai_data['ai_verdict']}_")
+                bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
                 time.sleep(3600)
-        time.sleep(180)
+            else:
+                print(f"[{time.strftime('%H:%M:%S')}] Анализ завершен. Сигналов нет."); time.sleep(300)
+        except Exception as e:
+            print(f"Error: {e}"); time.sleep(60)
 
 if __name__ == "__main__":
-    Thread(target=bot.infinity_polling).start()
-    trading_logic()
+    main_run()
