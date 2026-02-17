@@ -1,5 +1,7 @@
+ccxt
+pyTelegramBotAPI
 requests
 numpy
 pandas
-pandas-ta
-pyTelegramBotAPI
+pandas_ta
+matplotlib
