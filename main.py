@@ -173,95 +173,76 @@ class StrategyManager:
         tp = round(self.t['price'] + (atr*5) if side=="LONG" else self.t['price'] - (atr*5), 2)
         return {"side": side, "entry": self.t['price'], "sl": sl, "tp": tp, "score": sc}
 
-# --- [ГЛАВНЫЙ ЦИКЛ] ---
-def main_run():
-    collector = DataCollector("ETHUSDT")
-    bot.send_message(CHAT_ID, "🔮 **TITAN MONOLITH v2.0** АКТИВИРОВАН\nМониторинг ETH (15m/Bybit/Coinglass/News)")
-    while True:
-        try:
-            raw = collector.collect_all()
-            if not raw['market']: time.sleep(30); continue
-            
-            ana = TechnicalAnalyzer(raw)
-            tech = ana.calculate()
-            imb = ana.analyze_orderbook()
-            
-            geo = ChartGeometry(raw)
-            struct = {'structure': geo.detect_structure(), 'patterns': geo.find_patterns()}
-            lvls = geo.get_sr_levels()
-            
-            smart = SmartAnalyst(tech, raw)
-            smart.tech['imb'] = imb
-            ai_data = smart.analyze_all()
-            
-            setup = StrategyManager(tech, struct, ai_data).generate_setup()
-            
-            if setup['side']:
-                msg = (f"🚨 **{setup['side']} SIGNAL**\n━━━━━━━━━━━━\n🎯 Entry: `{setup['entry']}`\n🛡 SL: `{setup['sl']}` | 💰 TP: `{setup['tp']}`\n"
-                       f"📊 Score: `{setup['score']}/10` | RSI: `{round(tech['rsi'],1)}` | ADX: `{round(tech['adx'],1)}` \n"
-                       f"🧠 **AI:** _{ai_data['ai_verdict']}_")
-                bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                time.sleep(3600)
-            
 # --- [ГЛАВНЫЙ БЛОК ЗАПУСКА] ---
 
 def main_run():
-    # Список монет для мониторинга
+    # Настройки мониторинга
     SYMBOLS = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
     
-    # Создаем сборщики данных для каждой монеты
+    # Инициализация сборщиков данных для каждой монеты
     collectors = {sym: DataCollector(sym) for sym in SYMBOLS}
     
-    print("--- СИСТЕМА ЗАПУЩЕНА ---")
-    bot.send_message(CHAT_ID, f"🚀 **TITAN MULTI-BOT v2.1**\nМониторинг: {', '.join(SYMBOLS)}")
+    print("--- ТИТАН-БОТ v2.2 ЗАПУЩЕН ---")
     
+    # Проверка связи с Telegram при старте
+    try:
+        bot.send_message(CHAT_ID, f"🚀 **TITAN MULTI-BOT v2.2**\nМониторинг запущен: {', '.join(SYMBOLS)}")
+    except Exception as e:
+        print(f"Ошибка Telegram: {e}. Проверь CHAT_ID и TOKEN.")
+
     while True:
         for sym in SYMBOLS:
             try:
-                print(f"[{time.strftime('%H:%M:%S')}] Анализ {sym}...")
-                raw = collectors[sym].collect_all()
+                print(f"[{time.strftime('%H:%M:%S')}] Сканирую {sym}...")
                 
-                if not raw or not raw.get('market'):
+                # 1. Сбор рыночных данных
+                raw_data = collectors[sym].collect_all()
+                if not raw_data or not raw_data.get('market'):
+                    print(f"Ошибка получения данных для {sym}")
                     continue
                 
-                # 1. Технический анализ
-                ana = TechnicalAnalyzer(raw)
-                tech = ana.calculate()
-                if not tech: continue
+                # 2. Математический анализ индикаторов
+                analyzer = TechnicalAnalyzer(raw_data)
+                tech_results = analyzer.calculate()
+                if not tech_results:
+                    continue
                 
-                # 2. AI и Сентимент
-                smart = SmartAnalyst(tech, raw)
-                smart.tech['imb'] = ana.analyze_orderbook()
-                ai_data = smart.analyze_all()
+                # 3. AI Анализ и Сентимент
+                smart_guy = SmartAnalyst(tech_results, raw_data)
+                smart_guy.tech['imb'] = analyzer.analyze_orderbook()
+                ai_verdict = smart_guy.analyze_all()
                 
-                # 3. Геометрия
-                geo = ChartGeometry(raw)
-                struct = {'structure': geo.detect_structure(), 'patterns': geo.find_patterns()}
+                # 4. Геометрия графиков
+                geo_engine = ChartGeometry(raw_data)
+                geometry = {
+                    'structure': geo_engine.detect_structure(),
+                    'patterns': geo_engine.find_patterns()
+                }
                 
-                # 4. Стратегия
-                manager = StrategyManager(tech, struct, ai_data)
-                setup = manager.generate_setup()
+                # 5. Финальное решение стратегии
+                strat_manager = StrategyManager(tech_results, geometry, ai_verdict)
+                final_setup = strat_manager.generate_setup()
                 
-                # 5. Результат
-                if setup.get('side'):
-                    msg = (f"🚨 **{setup['side']} SIGNAL: {sym}**\n"
+                # 6. Отправка сигнала
+                if final_setup.get('side'):
+                    msg = (f"🚨 **{final_setup['side']} SIGNAL: {sym}**\n"
                            f"━━━━━━━━━━━━\n"
-                           f"🎯 Entry: `{setup['entry']}`\n"
-                           f"🛡 SL: `{setup['sl']}` | 💰 TP: `{setup['tp']}`\n"
-                           f"📊 Score: `{setup['score']}/10` | RSI: `{round(tech['rsi'],1)}` \n"
-                           f"🧠 **AI:** _{ai_data.get('ai_verdict', 'N/A')}_")
+                           f"🎯 Вход: `{final_setup['entry']}`\n"
+                           f"🛡 SL: `{final_setup['sl']}` | 💰 TP: `{final_setup['tp']}`\n"
+                           f"📊 Баллы: `{final_setup['score']}/10` | RSI: `{round(tech_results['rsi'], 1)}` \n"
+                           f"🧠 **AI:** _{ai_verdict.get('ai_verdict', 'N/A')}_")
+                    
                     bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                    print(f"!!! СИГНАЛ ОТПРАВЛЕН: {sym} !!!")
-                    time.sleep(5) 
+                    print(f"!!! СИГНАЛ ПО {sym} ОТПРАВЛЕН В ТЕЛЕГРАМ !!!")
+                    time.sleep(5)
                 else:
-                    print(f"[{time.strftime('%H:%M:%S')}] {sym}: Сигналов нет (Score: {setup.get('score', 0)})")
+                    print(f"[{time.strftime('%H:%M:%S')}] {sym}: Сигнала нет (Score: {final_setup.get('score', 0)})")
 
             except Exception as e:
-                print(f"Ошибка в цикле {sym}: {e}")
+                print(f"Ошибка при анализе {sym}: {e}")
                 time.sleep(2)
         
-        # После проверки всех монет ждем 5 минут
-        print(f"[{time.strftime('%H:%M:%S')}] Все монеты проверены. Пауза 5 минут...")
+        print(f"[{time.strftime('%H:%M:%S')}] Круг завершен. Сплю 5 минут...")
         time.sleep(300)
 
 if __name__ == "__main__":
