@@ -17,7 +17,7 @@ class DataCollector:
     def get_bybit_market_data(self):
         try:
             url = "https://api.bybit.com/v5/market"
-            k_res = requests.get(f"{url}/kline", params={"category": "linear", "symbol": self.symbol, "interval": "15", "limit": 200}, timeout=10).json()
+            k_res = requests.get(f"{url}/kline", params={"category": "linear", "symbol": self.symbol, "interval": "15", "limit: 1000}, timeout=10).json()
             klines = k_res['result']['list'][::-1]
             t_res = requests.get(f"{url}/tickers", params={"category": "linear", "symbol": self.symbol}, timeout=10).json()
             ticker = t_res['result']['list'][0]
@@ -175,75 +175,64 @@ class StrategyManager:
 
 # --- [ГЛАВНЫЙ БЛОК ЗАПУСКА] ---
 
-def main_run():
-    # Настройки мониторинга
-    SYMBOLS = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
-    
-    # Инициализация сборщиков данных для каждой монеты
-    collectors = {sym: DataCollector(sym) for sym in SYMBOLS}
-    
-    print("--- ТИТАН-БОТ v2.2 ЗАПУЩЕН ---")
-    
-    # Проверка связи с Telegram при старте
-    try:
-        bot.send_message(CHAT_ID, f"🚀 **TITAN MULTI-BOT v2.2**\nМониторинг запущен: {', '.join(SYMBOLS)}")
-    except Exception as e:
-        print(f"Ошибка Telegram: {e}. Проверь CHAT_ID и TOKEN.")
+import matplotlib.pyplot as plt
+import io
 
-    while True:
-        for sym in SYMBOLS:
-            try:
-                print(f"[{time.strftime('%H:%M:%S')}] Сканирую {sym}...")
-                
-                # 1. Сбор рыночных данных
-                raw_data = collectors[sym].collect_all()
-                if not raw_data or not raw_data.get('market'):
-                    print(f"Ошибка получения данных для {sym}")
-                    continue
-                
-                # 2. Математический анализ индикаторов
-                analyzer = TechnicalAnalyzer(raw_data)
-                tech_results = analyzer.calculate()
-                if not tech_results:
-                    continue
-                
-                # 3. AI Анализ и Сентимент
-                smart_guy = SmartAnalyst(tech_results, raw_data)
-                smart_guy.tech['imb'] = analyzer.analyze_orderbook()
-                ai_verdict = smart_guy.analyze_all()
-                
-                # 4. Геометрия графиков
-                geo_engine = ChartGeometry(raw_data)
-                geometry = {
-                    'structure': geo_engine.detect_structure(),
-                    'patterns': geo_engine.find_patterns()
-                }
-                
-                # 5. Финальное решение стратегии
-                strat_manager = StrategyManager(tech_results, geometry, ai_verdict)
-                final_setup = strat_manager.generate_setup()
-                
-                # 6. Отправка сигнала
-                if final_setup.get('side'):
-                    msg = (f"🚨 **{final_setup['side']} SIGNAL: {sym}**\n"
-                           f"━━━━━━━━━━━━\n"
-                           f"🎯 Вход: `{final_setup['entry']}`\n"
-                           f"🛡 SL: `{final_setup['sl']}` | 💰 TP: `{final_setup['tp']}`\n"
-                           f"📊 Баллы: `{final_setup['score']}/10` | RSI: `{round(tech_results['rsi'], 1)}` \n"
-                           f"🧠 **AI:** _{ai_verdict.get('ai_verdict', 'N/A')}_")
-                    
-                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                    print(f"!!! СИГНАЛ ПО {sym} ОТПРАВЛЕН В ТЕЛЕГРАМ !!!")
-                    time.sleep(5)
-                else:
-                    print(f"[{time.strftime('%H:%M:%S')}] {sym}: Сигнала нет (Score: {final_setup.get('score', 0)})")
+def run_visual_backtest(symbol="ETHUSDT"):
+    collector = DataCollector(symbol)
+    # Запрашиваем максимум данных
+    raw = collector.get_bybit_market_data() 
+    df = pd.DataFrame(raw['klines'], columns=['ts', 'o', 'h', 'l', 'c', 'v', 't'])
+    for col in ['o', 'h', 'l', 'c', 'v']: df[col] = pd.to_numeric(df[col])
+    
+    trades_log = []
+    print(f"🧐 Анализирую историю {symbol}...")
 
-            except Exception as e:
-                print(f"Ошибка при анализе {sym}: {e}")
-                time.sleep(2)
+    # Цикл бэктеста
+    for i in range(100, len(df) - 20):
+        # Эмуляция данных для анализатора
+        temp_bundle = {'market': {'klines': raw['klines'][:i+1]}, 'blockchain': {}, 'news': []}
         
-        print(f"[{time.strftime('%H:%M:%S')}] Круг завершен. Сплю 5 минут...")
-        time.sleep(300)
+        ana = TechnicalAnalyzer(temp_bundle)
+        tech = ana.calculate()
+        if not tech: continue
+        
+        geo = ChartGeometry(temp_bundle)
+        struct = {'structure': geo.detect_structure(), 'patterns': geo.find_patterns()}
+        
+        # Используем твой StrategyManager
+        setup = StrategyManager(tech, struct, {'ls_ratio':1, 'sentiment':'Neutral'}).generate_setup()
+        
+        if setup.get('side'):
+            # Проверка результата в следующих свечах
+            side, entry, tp, sl = setup['side'], setup['entry'], setup['tp'], setup['sl']
+            for j in range(i + 1, i + 20):
+                h, l = df['h'].iloc[j], df['l'].iloc[j]
+                res = "WIN" if (side=="LONG" and h>=tp) or (side=="SHORT" and l<=tp) else \
+                      "LOSS" if (side=="LONG" and l<=sl) or (side=="SHORT" and h>=sl) else None
+                if res:
+                    trades_log.append({'idx': i, 'side': side, 'price': entry, 'res': res})
+                    break
+
+    # --- ВИЗУАЛИЗАЦИЯ ---
+    plt.figure(figsize=(12, 6))
+    plt.plot(df['c'], color='#1f77b4', alpha=0.4, label='Price')
+    
+    # Отмечаем покупки и продажи
+    for t in trades_log:
+        color = 'green' if t['side'] == 'LONG' else 'red'
+        marker = '^' if t['side'] == 'LONG' else 'v'
+        plt.scatter(t['idx'], t['price'], marker=marker, color=color, s=100)
+
+    plt.title(f"BACKTEST {symbol} | Trades: {len(trades_log)}")
+    
+    # Отправка графика в Телеграм
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png')
+    buf.seek(0)
+    bot.send_photo(CHAT_ID, buf, caption=f"📊 Отчет по {symbol}\nСделок: {len(trades_log)}\nВинрейт: {round(len([t for t in trades_log if t['res']=='WIN'])/len(trades_log)*100,1) if trades_log else 0}%")
+    print(f"✅ Отчет по {symbol} отправлен в Telegram!")
 
 if __name__ == "__main__":
-    main_run()
+    for s in ["ETHUSDT", "BTCUSDT", "SOLUSDT"]:
+        run_visual_backtest(s)
