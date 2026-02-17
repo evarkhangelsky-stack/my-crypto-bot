@@ -203,56 +203,66 @@ def main_run():
                 bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
                 time.sleep(3600)
             
-if __name__ == "__main__":
+# --- [ГЛАВНЫЙ БЛОК ЗАПУСКА] ---
+
+def main_run():
     # Список монет для мониторинга
     SYMBOLS = ["ETHUSDT", "BTCUSDT", "SOLUSDT"]
-
-    def main_run():
-        # Создаем сборщики данных для каждой монеты
-        collectors = {sym: DataCollector(sym) for sym in SYMBOLS}
-        
-        print("--- СИСТЕМА ЗАПУЩЕНА ---")
-        bot.send_message(CHAT_ID, f"🚀 **TITAN MULTI-BOT v2.1**\nМониторинг: {', '.join(SYMBOLS)}")
-        
-        while True:
-            for sym in SYMBOLS:
-                try:
-                    print(f"[{time.strftime('%H:%M:%S')}] Анализ {sym}...")
-                    raw = collectors[sym].collect_all()
-                    
-                    if not raw or not raw.get('market'):
-                        continue
-                    
-                    # Полный цикл анализа
-                    ana = TechnicalAnalyzer(raw)
-                    tech = ana.calculate()
-                    if not tech: continue
-                    
-                    smart = SmartAnalyst(tech, raw)
-                    smart.tech['imb'] = ana.analyze_orderbook()
-                    ai_data = smart.analyze_all()
-                    
-                    geo = ChartGeometry(raw)
-                    struct = {'structure': geo.detect_structure(), 'patterns': geo.find_patterns()}
-                    
-                    setup = StrategyManager(tech, struct, ai_data).generate_setup()
-                    
-                    if setup.get('side'):
-                        msg = (f"🚨 **{setup['side']} SIGNAL: {sym}**\n"
-                               f"━━━━━━━━━━━━\n"
-                               f"🎯 Entry: `{setup['entry']}`\n"
-                               f"🛡 SL: `{setup['sl']}` | 💰 TP: `{setup['tp']}`\n"
-                               f"📊 Score: `{setup['score']}/10`\n"
-                               f"🧠 **AI:** _{ai_data.get('ai_verdict', 'N/A')}_")
-                        bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-                        time.sleep(5)
+    
+    # Создаем сборщики данных для каждой монеты
+    collectors = {sym: DataCollector(sym) for sym in SYMBOLS}
+    
+    print("--- СИСТЕМА ЗАПУЩЕНА ---")
+    bot.send_message(CHAT_ID, f"🚀 **TITAN MULTI-BOT v2.1**\nМониторинг: {', '.join(SYMBOLS)}")
+    
+    while True:
+        for sym in SYMBOLS:
+            try:
+                print(f"[{time.strftime('%H:%M:%S')}] Анализ {sym}...")
+                raw = collectors[sym].collect_all()
                 
-                except Exception as e:
-                    print(f"Ошибка в цикле {sym}: {e}")
-                    time.sleep(10)
-            
-            print(f"[{time.strftime('%H:%M:%S')}] Круг завершен. Пауза 5 мин.")
-            time.sleep(300)
+                if not raw or not raw.get('market'):
+                    continue
+                
+                # 1. Технический анализ
+                ana = TechnicalAnalyzer(raw)
+                tech = ana.calculate()
+                if not tech: continue
+                
+                # 2. AI и Сентимент
+                smart = SmartAnalyst(tech, raw)
+                smart.tech['imb'] = ana.analyze_orderbook()
+                ai_data = smart.analyze_all()
+                
+                # 3. Геометрия
+                geo = ChartGeometry(raw)
+                struct = {'structure': geo.detect_structure(), 'patterns': geo.find_patterns()}
+                
+                # 4. Стратегия
+                manager = StrategyManager(tech, struct, ai_data)
+                setup = manager.generate_setup()
+                
+                # 5. Результат
+                if setup.get('side'):
+                    msg = (f"🚨 **{setup['side']} SIGNAL: {sym}**\n"
+                           f"━━━━━━━━━━━━\n"
+                           f"🎯 Entry: `{setup['entry']}`\n"
+                           f"🛡 SL: `{setup['sl']}` | 💰 TP: `{setup['tp']}`\n"
+                           f"📊 Score: `{setup['score']}/10` | RSI: `{round(tech['rsi'],1)}` \n"
+                           f"🧠 **AI:** _{ai_data.get('ai_verdict', 'N/A')}_")
+                    bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
+                    print(f"!!! СИГНАЛ ОТПРАВЛЕН: {sym} !!!")
+                    time.sleep(5) 
+                else:
+                    print(f"[{time.strftime('%H:%M:%S')}] {sym}: Сигналов нет (Score: {setup.get('score', 0)})")
 
-    # Непосредственный вызов функции запуска
+            except Exception as e:
+                print(f"Ошибка в цикле {sym}: {e}")
+                time.sleep(2)
+        
+        # После проверки всех монет ждем 5 минут
+        print(f"[{time.strftime('%H:%M:%S')}] Все монеты проверены. Пауза 5 минут...")
+        time.sleep(300)
+
+if __name__ == "__main__":
     main_run()
