@@ -70,7 +70,8 @@ class BybitScalpingBot:
         self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
         self.deepseek_api_key = os.getenv('DEEPSEEK_API_KEY')
         self.coinglass_api_key = os.getenv('COINGLASS_API_KEY')
-        self.cryptopanic_api_key = os.getenv('CRYPTOPANIC_API_KEY')
+        self.cryptopanic_api_key = os.getenv('CRYPTOPANIC_API_KEY')  # auth_token
+        self.cryptopanic_api_plan = os.getenv('CRYPTOPANIC_API_PLAN', 'developer')  # default 'developer'
 
         required = [self.api_key, self.api_secret, self.telegram_token, self.telegram_chat_id]
         if not all(required):
@@ -147,9 +148,13 @@ class BybitScalpingBot:
         if not self.cryptopanic_api_key:
             return []
         try:
-            url = f"https://cryptopanic.com/api/v1/posts/?auth_token={self.cryptopanic_api_key}&kind=news"
-            res = requests.get(url, timeout=10).json()
-            return res.get('results', [])[:5]
+            url = f"https://cryptopanic.com/api/{self.cryptopanic_api_plan}/v2/posts/?auth_token={self.cryptopanic_api_key}&kind=news"
+            res = requests.get(url, timeout=10)
+            if res.status_code != 200:
+                print(f"CryptoPanic HTTP error: {res.status_code} - {res.text}")
+                return []
+            data = res.json()
+            return data.get('results', [])[:5]
         except Exception as e:
             print(f"CryptoPanic error: {e}")
             return []
