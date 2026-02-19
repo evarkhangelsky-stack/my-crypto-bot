@@ -388,6 +388,7 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
     def run(self):
         while True:
             print(f"[{datetime.now()}] Starting new cycle")  # Отладка начала цикла
+            self.get_balance()  # Вызов баланса для теста (будет печатать каждый цикл)
             for symbol in self.symbols:
                 try:
                     df = self.fetch_ohlcv(symbol)
