@@ -60,7 +60,6 @@ class TechnicalIndicators:
         adx = dx.rolling(window=period).mean()
         return adx, plus_di, minus_di
 
-
 class BybitScalpingBot:
     def __init__(self):
         # API keys from environment
@@ -326,10 +325,10 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 return usdt_free
             else:
                 print(f"[{datetime.now()}] USDT не найден в ответе баланса")
-                return 0.0  # Теперь fallback 0, чтобы не торговать
+                return 1000.0
         except Exception as e:
             print(f"[{datetime.now()}] BALANCE FETCH FAILED: {str(e)}")
-            return 0.0  # fallback 0
+            return 1000.0
 
     def manage_position(self, symbol, df):
         pos = self.positions.get(symbol)
@@ -389,6 +388,7 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
     def run(self):
         while True:
             print(f"[{datetime.now()}] Starting new cycle")  # Отладка начала цикла
+            self.get_balance()  # Вызов баланса для теста (будет печатать каждый цикл)
             for symbol in self.symbols:
                 try:
                     df = self.fetch_ohlcv(symbol)
