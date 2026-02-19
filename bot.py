@@ -1,202 +1,373 @@
-import os, time, ccxt, requests, pandas as pd, numpy as np
-from datetime import datetime, timezone
+import os
+import time
+import ccxt
+import pandas as pd
+import numpy as np
+import requests
+from datetime import datetime
+import telebot
 
-# ==========================================
-# 1. КОНФИГУРАЦИЯ (Railway Variables)
-# ==========================================
-API_KEY = os.getenv('BYBIT_API_KEY')
-API_SECRET = os.getenv('BYBIT_API_SECRET')
-DEEPSEEK_KEY = os.getenv('DEEPSEEK_API_KEY')
-CG_KEY = os.getenv('COINGLASS_API_KEY')
-CP_KEY = os.getenv('CRYPTOPANIC_API_KEY')
-TG_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-TG_CHAT = os.getenv('TELEGRAM_CHAT_ID')
-
-# Параметры торговли
-RISK_PER_TRADE = 0.01
-DAILY_LOSS_LIMIT = 0.05
-MAX_DAILY_LOSSES = 4
-LEVERAGE = 5
-FEE_RATE = 0.0006  # 0.06% Taker fee Bybit
-PARTIAL_FIX_PROGRESS = 0.25 # 25% пути до ТП = фикс 50%
-
-# ==========================================
-# 2. ИНДИКАТОРЫ (ПОЛНОСТЬЮ ИЗ PDF/REPLIT)
-# ==========================================
 class TechnicalIndicators:
+    """Собственные технические индикаторы"""
+
     @staticmethod
-    def vwap(df):
-        tp = (df['h'] + df['l'] + df['c']) / 3
-        return (tp * df['v']).cumsum() / df['v'].cumsum()
+    def vwap(high, low, close, volume):
+        typical_price = (high + low + close) / 3
+        return (typical_price * volume).cumsum() / volume.cumsum()
 
     @staticmethod
     def rsi(close, period=14):
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-        return 100 - (100 / (1 + (gain / loss)))
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    @staticmethod
+    def ema(close, period):
+        return close.ewm(span=period, adjust=False).mean()
+
+    @staticmethod
+    def atr(high, low, close, period=14):
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        return tr.rolling(window=period).mean()
+
+    @staticmethod
+    def bollinger_bands(close, period=20, std=2):
+        middle = close.rolling(window=period).mean()
+        std_dev = close.rolling(window=period).std()
+        upper = middle + (std_dev * std)
+        lower = middle - (std_dev * std)
+        return upper, middle, lower
 
     @staticmethod
     def adx(high, low, close, period=14):
-        plus_dm = high.diff().clip(lower=0)
-        minus_dm = (-low.diff()).clip(lower=0)
-        tr = pd.concat([high-low, abs(high-close.shift()), abs(low-close.shift())], axis=1).max(axis=1)
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm < 0] = 0
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
         atr = tr.rolling(window=period).mean()
         plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
         minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
         dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-        return dx.rolling(window=period).mean()
+        adx = dx.rolling(window=period).mean()
+        return adx, plus_di, minus_di
 
-    @staticmethod
-    def bollinger_bands(close, period=20, std=2):
-        mid = close.rolling(window=period).mean()
-        std_dev = close.rolling(window=period).std()
-        return mid + (std_dev * std), mid, mid - (std_dev * std)
 
-# ==========================================
-# 3. СБОР ВНЕШНИХ ДАННЫХ (COINGLASS / NEWS)
-# ==========================================
-class Analytics:
-    @staticmethod
-    def get_coinglass_data(symbol):
-        if not CG_KEY: return {"ratio": 50, "liqs": 0}
-        try:
-            coin = symbol.split('/')[0]
-            headers = {"coinglassToken": CG_KEY}
-            # Long/Short Ratio
-            ls_res = requests.get(f"https://open-api-v4.coinglass.com/api/futures/long-short-ratio?symbol={coin}&time_type=h1", headers=headers, timeout=5).json()
-            # Ликвидации за 1 час
-            liq_res = requests.get(f"https://open-api-v4.coinglass.com/api/futures/liquidation/map?symbol={coin}&range=24h", headers=headers, timeout=5).json()
-            
-            ratio = float(ls_res['data'][0]['longRatio']) if ls_res.get('data') else 50
-            liqs = len(liq_res.get('data', [])) # Считаем количество крупных кластеров ликвидаций
-            return {"ratio": ratio, "liqs": liqs}
-        except: return {"ratio": 50, "liqs": 0}
-
-    @staticmethod
-    def get_news():
-        if not CP_KEY: return "No news"
-        try:
-            res = requests.get(f"https://cryptopanic.com/api/v1/posts/?auth_token={CP_KEY}&kind=news").json()
-            return " | ".join([p['title'] for p in res['results'][:3]])
-        except: return "News Error"
-
-# ==========================================
-# 4. МОЗГ И ИСПОЛНЕНИЕ
-# ==========================================
-class ProBot:
+class BybitScalpingBot:
     def __init__(self):
-        self.exchange = ccxt.bybit({'apiKey': API_KEY, 'secret': API_SECRET, 'options': {'defaultType': 'future'}})
+        # API keys from environment
+        self.api_key = os.getenv('BYBIT_API_KEY')
+        self.api_secret = os.getenv('BYBIT_API_SECRET')
+        self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+        self.telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
+        self.deepseek_api_key = os.getenv('DEEPSEEK_API_KEY')
+        self.coinglass_api_key = os.getenv('COINGLASS_API_KEY')
+        self.cryptopanic_api_key = os.getenv('CRYPTOPANIC_API_KEY')
+
+        required = [self.api_key, self.api_secret, self.telegram_token, self.telegram_chat_id]
+        if not all(required):
+            raise ValueError(
+                "Missing required environment variables: "
+                "BYBIT_API_KEY, BYBIT_API_SECRET, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID"
+            )
+
+        # Initialize Bybit (linear futures)
+        self.exchange = ccxt.bybit({
+            'apiKey': self.api_key,
+            'secret': self.api_secret,
+            'enableRateLimit': True,
+            'options': {'defaultType': 'linear'}
+        })
+
+        # Initialize Telegram
+        self.bot = telebot.TeleBot(self.telegram_token)
+
+        # Trading parameters
         self.symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT']
-        self.active_positions = {}
-        self.daily_losses = 0
-        self.last_reset = datetime.now(timezone.utc).day
+        self.timeframe = '5m'
+        self.positions = {symbol: None for symbol in self.symbols}
 
-    def send_tg(self, msg):
-        try: requests.post(f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage", data={'chat_id': TG_CHAT, 'text': msg, 'parse_mode': 'Markdown'})
-        except: pass
+        self.sl_atr_multiplier = 1.2
+        self.tp_atr_multiplier = 2.0
+        self.trailing_stop_percent = 0.5
+        self.taker_fee = 0.0006  # 0.06%
 
-    def get_ai_decision(self, symbol, signal, df, analytics, news):
-        if not DEEPSEEK_KEY: return True
+        print(f"[{datetime.now()}] Bot initialized for {self.symbols}")
+        self.send_telegram(f"Bot started\nSymbols: {' '.join(self.symbols)}\nTimeframe: {self.timeframe}")
+
+    def send_telegram(self, message):
+        try:
+            self.bot.send_message(self.telegram_chat_id, message, parse_mode='Markdown')
+        except Exception as e:
+            print(f"Telegram error: {e}")
+
+    def fetch_ohlcv(self, symbol, limit=1000):
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=limit)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            return df
+        except Exception as e:
+            print(f"Error fetching OHLCV for {symbol}: {e}")
+            return None
+
+    def fetch_orderbook_data(self, symbol):
+        try:
+            orderbook = self.exchange.fetch_order_book(symbol, limit=50)
+            total_bids = sum(bid[1] for bid in orderbook['bids'])
+            total_asks = sum(ask[1] for ask in orderbook['asks'])
+            total = total_bids + total_asks
+            bid_ratio = (total_bids / total) * 100 if total > 0 else 50
+            return {'bid_ratio': bid_ratio, 'total_volume': total}
+        except Exception as e:
+            print(f"Error fetching orderbook for {symbol}: {e}")
+            return {'bid_ratio': 50, 'total_volume': 0}
+
+    def fetch_coinglass_data(self, symbol_base):
+        if not self.coinglass_api_key:
+            return {}
+        try:
+            headers = {'cg-api-key': self.coinglass_api_key}
+            url = f"https://open-api.coinglass.com/public/v2/long_short?symbol={symbol_base}&time_type=h1"
+            res = requests.get(url, headers=headers, timeout=10).json()
+            return res.get('data', [])[0] if res.get('success') else {}
+        except Exception as e:
+            print(f"Coinglass error: {e}")
+            return {}
+
+    def fetch_cryptopanic_news(self):
+        if not self.cryptopanic_api_key:
+            return []
+        try:
+            url = f"https://cryptopanic.com/api/v1/posts/?auth_token={self.cryptopanic_api_key}&kind=news"
+            res = requests.get(url, timeout=10).json()
+            return res.get('results', [])[:5]
+        except Exception as e:
+            print(f"CryptoPanic error: {e}")
+            return []
+
+    def calculate_indicators(self, df):
+        df['vwap'] = TechnicalIndicators.vwap(df['high'], df['low'], df['close'], df['volume'])
+        df['rsi'] = TechnicalIndicators.rsi(df['close'], period=14)
+        adx, di_plus, di_minus = TechnicalIndicators.adx(df['high'], df['low'], df['close'], period=14)
+        df['adx'] = adx
+        bb_upper, bb_middle, bb_lower = TechnicalIndicators.bollinger_bands(df['close'], period=20, std=2)
+        df['bb_upper'] = bb_upper
+        df['bb_lower'] = bb_lower
+        df['atr'] = TechnicalIndicators.atr(df['high'], df['low'], df['close'], period=14)
+        df['ema_20'] = TechnicalIndicators.ema(df['close'], period=20)
+        df['ema_50'] = TechnicalIndicators.ema(df['close'], period=50)
+        return df
+
+    def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
+        if not self.deepseek_api_key:
+            return True
         try:
             last = df.iloc[-1]
-            prompt = (f"Market Data for {symbol} ({signal}):\n"
-                      f"- RSI: {last['rsi']:.1f}, ADX: {last['adx']:.1f}\n"
-                      f"- L/S Ratio: {analytics['ratio']}%\n"
-                      f"- Liquidation Clusters: {analytics['liqs']}\n"
-                      f"- News: {news}\n"
-                      "Trade? (YES/NO)")
-            headers = {"Authorization": f"Bearer {DEEPSEEK_KEY}", "Content-Type": "application/json"}
-            payload = {"model": "deepseek-chat", "messages": [{"role": "user", "content": prompt}]}
-            res = requests.post("https://api.deepseek.com/v1/chat/completions", headers=headers, json=payload).json()
-            return "YES" in res['choices'][0]['message']['content'].upper()
-        except: return True
+            news_text = "\n".join(n.get('title', '') for n in news)
+            prompt = f"""Analyze trading signal for {symbol}:
+Signal: {signal}
+Price: {last['close']}
+RSI: {last['rsi']:.2f}, ADX: {last['adx']:.2f}
+Orderbook Bid Ratio: {orderbook['bid_ratio']:.2f}%
+Coinglass L/S Ratio: {coinglass.get('longShortRatio', 'N/A')}
+Recent News: {news_text}
 
-    def calculate_qty(self, symbol, entry, sl):
+Reply with ONLY "YES" or "NO" if this trade is high probability."""
+            res = requests.post(
+                'https://api.deepseek.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {self.deepseek_api_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'deepseek-chat',
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0.1
+                },
+                timeout=15
+            ).json()
+            answer = res['choices'][0]['message']['content'].strip().upper()
+            return "YES" in answer
+        except Exception as e:
+            print(f"AI error: {e}")
+            return True
+
+    def detect_signal(self, symbol, df):
+        last = df.iloc[-1]
+        price = last['close']
+        rsi = last['rsi']
+        adx = last['adx']
+        vwap = last['vwap']
+        atr = last['atr']
+        bb_upper = last['bb_upper']
+        bb_lower = last['bb_lower']
+        ema_20 = last['ema_20']
+        ema_50 = last['ema_50']
+
+        if pd.isna([price, rsi, adx, vwap, atr]).any():
+            return None, None, None
+
+        ob = self.fetch_orderbook_data(symbol)
+        bid_ratio = ob['bid_ratio']
+
+        signal = None
+        if adx < 25:  # Sideways
+            if price <= bb_lower and rsi < 30 and bid_ratio > 60:
+                signal = 'LONG'
+            elif price >= bb_upper and rsi > 70 and bid_ratio < 40:
+                signal = 'SHORT'
+        else:  # Trending
+            if price > vwap and ema_20 > ema_50 and rsi > 40 and bid_ratio > 60:
+                signal = 'LONG'
+            elif price < vwap and ema_20 < ema_50 and rsi < 60 and bid_ratio < 40:
+                signal = 'SHORT'
+
+        if signal:
+            base = symbol.split('/')[0]
+            cg = self.fetch_coinglass_data(base)
+            news = self.fetch_cryptopanic_news()
+
+            if not self.get_ai_filter(symbol, df, signal, ob, cg, news):
+                return None, None, None
+
+            entry = price
+            fee_adj = price * self.taker_fee
+            if signal == 'LONG':
+                sl = entry - (self.sl_atr_multiplier * atr) - fee_adj
+                tp = entry + (self.tp_atr_multiplier * atr) + fee_adj
+            else:
+                sl = entry + (self.sl_atr_multiplier * atr) + fee_adj
+                tp = entry - (self.tp_atr_multiplier * atr) - fee_adj
+
+            return signal, "Scalp", {'entry': entry, 'stop_loss': sl, 'take_profit': tp}
+
+        return None, None, None
+
+    def place_order(self, symbol, signal, params):
         try:
-            balance = float(self.exchange.fetch_balance()['total']['USDT'])
-            risk_usd = balance * RISK_PER_TRADE
-            qty = risk_usd / abs(entry - sl)
-            return float(self.exchange.amount_to_precision(symbol, qty))
-        except: return 0
+            balance = self.get_balance()
+            risk = balance * 0.01  # 1% risk per trade
+            size = risk / abs(params['entry'] - params['stop_loss'])
+            size = round(size, 3)
+
+            msg = (
+                f"📉 *Signal: {symbol}*\n"
+                f"{signal} ({params['entry']:.2f})\n"
+                f"SL: {params['stop_loss']:.2f}\n"
+                f"TP: {params['take_profit']:.2f}"
+            )
+            self.send_telegram(msg)
+
+            # Реальные ордера (market)
+            if signal == 'LONG':
+                order = self.exchange.create_market_buy_order(symbol, size)
+            else:
+                order = self.exchange.create_market_sell_order(symbol, size)
+
+            # Если есть average price — обновляем entry
+            actual_entry = order.get('average') or params['entry']
+            params['entry'] = actual_entry
+
+            self.positions[symbol] = {
+                'side': signal,
+                'entry': params['entry'],
+                'stop_loss': params['stop_loss'],
+                'take_profit': params['take_profit'],
+                'size': size,
+                'trailing_stop_activated': False
+            }
+
+        except Exception as e:
+            print(f"Order error for {symbol}: {e}")
+
+    def get_balance(self):
+        try:
+            return float(self.exchange.fetch_balance()['USDT']['free'])
+        except Exception:
+            return 1000.0  # fallback для тестов
 
     def manage_position(self, symbol, df):
-        pos = self.active_positions[symbol]
-        price = df.iloc[-1]['c']
-        
-        goal = abs(pos['tp'] - pos['entry'])
-        move = (price - pos['entry']) if pos['side'] == 'buy' else (pos['entry'] - price)
-        progress = move / goal if goal > 0 else 0
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
 
-        # Фикс 50% и БУ
-        if progress >= PARTIAL_FIX_PROGRESS and not pos['half_closed']:
-            try:
-                side_close = 'sell' if pos['side'] == 'buy' else 'buy'
-                self.exchange.create_order(symbol, 'market', side_close, pos['qty']/2)
-                # Ставим стоп в цену входа + комиссия
-                offset = pos['entry'] * FEE_RATE * 2
-                pos['sl'] = pos['entry'] + offset if pos['side'] == 'buy' else pos['entry'] - offset
-                pos['half_closed'] = True
-                self.send_tg(f"💰 {symbol}: 50% профита взято. Остальное в безубытке.")
-            except Exception as e: print(f"Manage Error: {e}")
+        curr = df.iloc[-1]['close']
+        side = pos['side']
+        entry = pos['entry']
+        sl = pos['stop_loss']
+        tp = pos['take_profit']
 
-        # Закрытие по цели
-        is_tp = (price >= pos['tp']) if pos['side'] == 'buy' else (price <= pos['tp'])
-        is_sl = (price <= pos['sl']) if pos['side'] == 'buy' else (price >= pos['sl'])
+        if side == 'LONG':
+            pnl_pct = ((curr - entry) / entry) * 100
+        else:
+            pnl_pct = ((entry - curr) / entry) * 100
 
-        if is_tp or is_sl:
-            res = "✅ PROFIT" if is_tp else "❌ LOSS"
-            if not is_tp: self.daily_losses += 1
-            del self.active_positions[symbol]
-            self.send_tg(f"🏁 {symbol} закрыт: {res}. Цена: {price}")
+        if (side == 'LONG' and curr <= sl) or (side == 'SHORT' and curr >= sl):
+            self.close_position(symbol, curr, 'SL Hit')
+        elif (side == 'LONG' and curr >= tp) or (side == 'SHORT' and curr <= tp):
+            self.close_position(symbol, curr, 'TP Hit')
+        elif pnl_pct > self.trailing_stop_percent and not pos['trailing_stop_activated']:
+            pos['stop_loss'] = entry  # breakeven
+            pos['trailing_stop_activated'] = True
+            self.send_telegram(f'Trailing: {symbol} to Breakeven')
+
+    def close_position(self, symbol, price, reason):
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
+
+        if pos['side'] == 'LONG':
+            pnl = (price - pos['entry']) * pos['size']
+        else:
+            pnl = (pos['entry'] - price) * pos['size']
+
+        self.send_telegram(
+            f"Closed {symbol}\n"
+            f"Reason: {reason}\n"
+            f"P&L: ${pnl:.2f}"
+        )
+
+        # Реальное закрытие позиции
+        try:
+            if pos['side'] == 'LONG':
+                self.exchange.create_market_sell_order(symbol, pos['size'])
+            else:
+                self.exchange.create_market_buy_order(symbol, pos['size'])
+        except Exception as e:
+            print(f"Close order error for {symbol}: {e}")
+
+        self.positions[symbol] = None
 
     def run(self):
-        self.send_tg("🚀 **Bybit Master Bot Active.**\nАналитика Coinglass + Ликвидации + AI.")
         while True:
-            if datetime.now(timezone.utc).day != self.last_reset:
-                self.daily_losses = 0
-                self.last_reset = datetime.now(timezone.utc).day
-
-            if self.daily_losses >= MAX_DAILY_LOSSES:
-                time.sleep(3600); continue
-
             for symbol in self.symbols:
                 try:
-                    bars = self.exchange.fetch_ohlcv(symbol, '5m', limit=200) # Глубокая история
-                    df = pd.DataFrame(bars, columns=['t','o','h','l','c','v'])
-                    df['rsi'] = TechnicalIndicators.rsi(df['c'])
-                    df['adx'] = TechnicalIndicators.adx(df['h'], df['l'], df['c'])
-                    df['bb_u'], _, df['bb_l'] = TechnicalIndicators.bollinger_bands(df['c'])
-                    
-                    if symbol in self.active_positions:
+                    df = self.fetch_ohlcv(symbol)
+                    if df is None:
+                        continue
+                    df = self.calculate_indicators(df)
+
+                    if self.positions.get(symbol):
                         self.manage_position(symbol, df)
                     else:
-                        last = df.iloc[-1]
-                        signal = None
-                        # Уровни с учетом комиссии
-                        if last['rsi'] < 30 and last['c'] < last['bb_l'] and last['adx'] < 45:
-                            signal, params = 'LONG', {'entry': last['c'], 'sl': last['c']*0.994, 'tp': last['c']*1.018}
-                        elif last['rsi'] > 70 and last['c'] > last['bb_u'] and last['adx'] < 45:
-                            signal, params = 'SHORT', {'entry': last['c'], 'sl': last['c']*1.006, 'tp': last['c']*0.982}
-
+                        signal, s_type, params = self.detect_signal(symbol, df)
                         if signal:
-                            analytics = Analytics.get_coinglass_data(symbol)
-                            news = Analytics.get_news()
-                            # Совокупный фильтр
-                            ls_ok = (signal == 'LONG' and analytics['ratio'] < 60) or (signal == 'SHORT' and analytics['ratio'] > 40)
-                            
-                            if ls_ok and self.get_ai_decision(symbol, signal, df, analytics, news):
-                                qty = self.calculate_qty(symbol, params['entry'], params['sl'])
-                                if qty > 0:
-                                    self.exchange.create_order(symbol, 'market', 'buy' if signal=='LONG' else 'sell', qty)
-                                    self.active_positions[symbol] = {
-                                        'side': 'buy' if signal=='LONG' else 'sell', 'entry': last['c'],
-                                        'qty': qty, 'tp': params['tp'], 'sl': params['sl'], 'half_closed': False
-                                    }
-                                    self.send_tg(f"🔥 ВХОД {symbol} {signal}.\nL/S: {analytics['ratio']}%\nAI: OK")
-                except Exception as e: print(f"Error {symbol}: {e}")
-                time.sleep(2)
-            time.sleep(20) # 20 секунд между проверками
+                            self.place_order(symbol, signal, params)
+                except Exception as e:
+                    print(f"Error for {symbol}: {e}")
+
+            time.sleep(30)  # защита от rate limit
+
 
 if __name__ == "__main__":
-    ProBot().run()
+    bot = BybitScalpingBot()
+    bot.run()
