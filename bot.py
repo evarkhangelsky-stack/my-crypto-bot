@@ -60,7 +60,6 @@ class TechnicalIndicators:
         adx = dx.rolling(window=period).mean()
         return adx, plus_di, minus_di
 
-
 class BybitScalpingBot:
     def __init__(self):
         # API keys from environment
@@ -88,11 +87,20 @@ class BybitScalpingBot:
             'options': {'defaultType': 'linear'}
         })
 
+        # Настройка margin mode и leverage (добавлено)
+        self.symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT']
+        for symbol in self.symbols:
+            try:
+                self.exchange.set_margin_mode('cross', symbol)  # 'cross' по умолчанию, или 'isolated'
+                self.exchange.set_leverage(5, symbol)  # x5 плечо
+                print(f"[{datetime.now()}] Leverage set to 5x and cross margin for {symbol}")
+            except Exception as e:
+                print(f"Error setting leverage/margin for {symbol}: {e}")
+
         # Initialize Telegram
         self.bot = telebot.TeleBot(self.telegram_token)
 
         # Trading parameters
-        self.symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT']
         self.timeframe = '5m'
         self.positions = {symbol: None for symbol in self.symbols}
 
@@ -115,9 +123,10 @@ class BybitScalpingBot:
             ohlcv = self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            print(f"[{datetime.now()}] OHLCV fetched successfully for {symbol}, rows: {len(df)}")  # Отладка
             return df
         except Exception as e:
-            print(f"Error fetching OHLCV for {symbol}: {e}")
+            print(f"[{datetime.now()}] Error fetching OHLCV for {symbol}: {e}")  # Отладка ошибки
             return None
 
     def fetch_orderbook_data(self, symbol):
@@ -127,9 +136,10 @@ class BybitScalpingBot:
             total_asks = sum(ask[1] for ask in orderbook['asks'])
             total = total_bids + total_asks
             bid_ratio = (total_bids / total) * 100 if total > 0 else 50
+            print(f"[{datetime.now()}] Orderbook fetched for {symbol}, bid_ratio: {bid_ratio:.2f}%")  # Отладка
             return {'bid_ratio': bid_ratio, 'total_volume': total}
         except Exception as e:
-            print(f"Error fetching orderbook for {symbol}: {e}")
+            print(f"[{datetime.now()}] Error fetching orderbook for {symbol}: {e}")
             return {'bid_ratio': 50, 'total_volume': 0}
 
     def fetch_coinglass_data(self, symbol_base):
@@ -151,12 +161,12 @@ class BybitScalpingBot:
             url = f"https://cryptopanic.com/api/{self.cryptopanic_api_plan}/v2/posts/?auth_token={self.cryptopanic_api_key}&kind=news"
             res = requests.get(url, timeout=10)
             if res.status_code != 200:
-                print(f"CryptoPanic HTTP error: {res.status_code} - {res.text}")
+                print(f"[{datetime.now()}] CryptoPanic HTTP error: {res.status_code} - {res.text}")
                 return []
             data = res.json()
             return data.get('results', [])[:5]
         except Exception as e:
-            print(f"CryptoPanic error: {e}")
+            print(f"[{datetime.now()}] CryptoPanic error: {e}")
             return []
 
     def calculate_indicators(self, df):
@@ -170,6 +180,7 @@ class BybitScalpingBot:
         df['atr'] = TechnicalIndicators.atr(df['high'], df['low'], df['close'], period=14)
         df['ema_20'] = TechnicalIndicators.ema(df['close'], period=20)
         df['ema_50'] = TechnicalIndicators.ema(df['close'], period=50)
+        print(f"[{datetime.now()}] Indicators calculated")  # Отладка
         return df
 
     def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
@@ -201,9 +212,10 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 timeout=15
             ).json()
             answer = res['choices'][0]['message']['content'].strip().upper()
+            print(f"[{datetime.now()}] AI filter: {answer}")  # Отладка
             return "YES" in answer
         except Exception as e:
-            print(f"AI error: {e}")
+            print(f"[{datetime.now()}] AI error: {e}")
             return True
 
     def detect_signal(self, symbol, df):
@@ -219,6 +231,7 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
         ema_50 = last['ema_50']
 
         if pd.isna([price, rsi, adx, vwap, atr]).any():
+            print(f"[{datetime.now()}] NaN in indicators for {symbol} — no signal")  # Отладка
             return None, None, None
 
         ob = self.fetch_orderbook_data(symbol)
@@ -242,6 +255,7 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
             news = self.fetch_cryptopanic_news()
 
             if not self.get_ai_filter(symbol, df, signal, ob, cg, news):
+                print(f"[{datetime.now()}] AI filter rejected signal for {symbol}")  # Отладка
                 return None, None, None
 
             entry = price
@@ -253,8 +267,10 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 sl = entry + (self.sl_atr_multiplier * atr) + fee_adj
                 tp = entry - (self.tp_atr_multiplier * atr) - fee_adj
 
+            print(f"[{datetime.now()}] Signal detected: {signal} for {symbol}")  # Отладка сигнала
             return signal, "Scalp", {'entry': entry, 'stop_loss': sl, 'take_profit': tp}
 
+        print(f"[{datetime.now()}] No signal for {symbol}")  # Отладка отсутствия сигнала
         return None, None, None
 
     def place_order(self, symbol, signal, params):
@@ -290,14 +306,18 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 'size': size,
                 'trailing_stop_activated': False
             }
+            print(f"[{datetime.now()}] Order placed: {signal} {size} for {symbol}")  # Отладка ордера
 
         except Exception as e:
-            print(f"Order error for {symbol}: {e}")
+            print(f"[{datetime.now()}] Order error for {symbol}: {e}")
 
     def get_balance(self):
         try:
-            return float(self.exchange.fetch_balance()['USDT']['free'])
-        except Exception:
+            balance = float(self.exchange.fetch_balance()['USDT']['free'])
+            print(f"[{datetime.now()}] Balance: {balance} USDT")  # Отладка баланса
+            return balance
+        except Exception as e:
+            print(f"[{datetime.now()}] Balance error: {e}")
             return 1000.0  # fallback для тестов
 
     def manage_position(self, symbol, df):
@@ -325,6 +345,8 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
             pos['trailing_stop_activated'] = True
             self.send_telegram(f'Trailing: {symbol} to Breakeven')
 
+        print(f"[{datetime.now()}] Position checked for {symbol}, PNL %: {pnl_pct:.2f}")  # Отладка позиции
+
     def close_position(self, symbol, price, reason):
         pos = self.positions.get(symbol)
         if not pos:
@@ -347,17 +369,20 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 self.exchange.create_market_sell_order(symbol, pos['size'])
             else:
                 self.exchange.create_market_buy_order(symbol, pos['size'])
+            print(f"[{datetime.now()}] Position closed for {symbol}: {reason}")  # Отладка закрытия
         except Exception as e:
-            print(f"Close order error for {symbol}: {e}")
+            print(f"[{datetime.now()}] Close order error for {symbol}: {e}")
 
         self.positions[symbol] = None
 
     def run(self):
         while True:
+            print(f"[{datetime.now()}] Starting new cycle")  # Отладка начала цикла
             for symbol in self.symbols:
                 try:
                     df = self.fetch_ohlcv(symbol)
                     if df is None:
+                        print(f"[{datetime.now()}] Skipping {symbol} - no data")  # Отладка скипа
                         continue
                     df = self.calculate_indicators(df)
 
@@ -368,8 +393,8 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                         if signal:
                             self.place_order(symbol, signal, params)
                 except Exception as e:
-                    print(f"Error for {symbol}: {e}")
-
+                    print(f"[{datetime.now()}] Error for {symbol}: {e}")
+            print(f"[{datetime.now()}] Cycle finished, sleeping 30s")  # Отладка конца цикла
             time.sleep(30)  # защита от rate limit
 
 
