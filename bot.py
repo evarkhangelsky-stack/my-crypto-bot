@@ -230,6 +230,8 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
         ema_20 = last['ema_20']
         ema_50 = last['ema_50']
 
+        print(f"[{datetime.now()}] {symbol} values: Price={price:.2f}, RSI={rsi:.2f}, ADX={adx:.2f}, VWAP={vwap:.2f}, EMA20={ema_20:.2f}, EMA50={ema_50:.2f}, ATR={atr:.2f}, BB Upper={bb_upper:.2f}, BB Lower={bb_lower:.2f}")  # Отладка значений
+
         if pd.isna([price, rsi, adx, vwap, atr]).any():
             print(f"[{datetime.now()}] NaN in indicators for {symbol} — no signal")  # Отладка
             return None, None, None
@@ -243,11 +245,13 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 signal = 'LONG'
             elif price >= bb_upper and rsi > 70 and bid_ratio < 40:
                 signal = 'SHORT'
+            print(f"[{datetime.now()}] Sideways check: Price vs BB Lower={price <= bb_lower}, RSI<30={rsi < 30}, Bid>60={bid_ratio > 60}; Price vs BB Upper={price >= bb_upper}, RSI>70={rsi > 70}, Bid<40={bid_ratio < 40}")  # Отладка условий
         else:  # Trending
             if price > vwap and ema_20 > ema_50 and rsi > 40 and bid_ratio > 60:
                 signal = 'LONG'
             elif price < vwap and ema_20 < ema_50 and rsi < 60 and bid_ratio < 40:
                 signal = 'SHORT'
+            print(f"[{datetime.now()}] Trending check: Price>VWAP={price > vwap}, EMA20>EMA50={ema_20 > ema_50}, RSI>40={rsi > 40}, Bid>60={bid_ratio > 60}; Price<VWAP={price < vwap}, EMA20<EMA50={ema_20 < ema_50}, RSI<60={rsi < 60}, Bid<40={bid_ratio < 40}")  # Отладка условий
 
         if signal:
             base = symbol.split('/')[0]
@@ -312,19 +316,19 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
             print(f"[{datetime.now()}] Order error for {symbol}: {e}")
 
     def get_balance(self):
-    try:
-        bal = self.exchange.fetch_balance()
-        print(f"[{datetime.now()}] Полный ответ fetch_balance: {bal}")
-        if 'USDT' in bal and 'free' in bal['USDT']:
-            usdt_free = float(bal['USDT']['free'])
-            print(f"[{datetime.now()}] USDT free balance: {usdt_free}")
-            return usdt_free
-        else:
-            print(f"[{datetime.now()}] USDT не найден в ответе баланса")
+        try:
+            bal = self.exchange.fetch_balance()
+            print(f"[{datetime.now()}] Полный ответ fetch_balance: {bal}")
+            if 'USDT' in bal and 'free' in bal['USDT']:
+                usdt_free = float(bal['USDT']['free'])
+                print(f"[{datetime.now()}] USDT free balance: {usdt_free}")
+                return usdt_free
+            else:
+                print(f"[{datetime.now()}] USDT не найден в ответе баланса")
+                return 1000.0
+        except Exception as e:
+            print(f"[{datetime.now()}] BALANCE FETCH FAILED: {str(e)}")
             return 1000.0
-    except Exception as e:
-        print(f"[{datetime.now()}] BALANCE FETCH FAILED: {str(e)}")
-        return 1000.0
 
     def manage_position(self, symbol, df):
         pos = self.positions.get(symbol)
