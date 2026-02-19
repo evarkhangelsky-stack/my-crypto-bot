@@ -196,7 +196,7 @@ class ProBot:
                                     self.send_tg(f"🔥 ВХОД {symbol} {signal}.\nL/S: {analytics['ratio']}%\nAI: OK")
                 except Exception as e: print(f"Error {symbol}: {e}")
                 time.sleep(2)
-            time.sleep(20) # 20 секунд 20 секунд между проверками
+            time.sleep(20) # 20 секунд между проверками
 
 if __name__ == "__main__":
     ProBot().run()
