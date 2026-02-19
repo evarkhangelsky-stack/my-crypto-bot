@@ -312,13 +312,19 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
             print(f"[{datetime.now()}] Order error for {symbol}: {e}")
 
     def get_balance(self):
-        try:
-            balance = float(self.exchange.fetch_balance()['USDT']['free'])
-            print(f"[{datetime.now()}] Balance: {balance} USDT")  # Отладка баланса
-            return balance
-        except Exception as e:
-            print(f"[{datetime.now()}] Balance error: {e}")
-            return 1000.0  # fallback для тестов
+    try:
+        bal = self.exchange.fetch_balance()
+        print(f"[{datetime.now()}] Полный ответ fetch_balance: {bal}")
+        if 'USDT' in bal and 'free' in bal['USDT']:
+            usdt_free = float(bal['USDT']['free'])
+            print(f"[{datetime.now()}] USDT free balance: {usdt_free}")
+            return usdt_free
+        else:
+            print(f"[{datetime.now()}] USDT не найден в ответе баланса")
+            return 1000.0
+    except Exception as e:
+        print(f"[{datetime.now()}] BALANCE FETCH FAILED: {str(e)}")
+        return 1000.0
 
     def manage_position(self, symbol, df):
         pos = self.positions.get(symbol)
