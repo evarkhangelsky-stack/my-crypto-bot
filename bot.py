@@ -88,8 +88,167 @@ class TechnicalIndicators:
         return macd_line, signal_line, histogram
 
 
+class MultiTimeframeAnalyzer:
+    """Анализирует старшие таймфреймы для определения глобального тренда"""
+    
+    def __init__(self, exchange):
+        self.exchange = exchange
+        self.timeframes = {
+            '1h': {'weight': 0.3, 'name': 'Часовой'},
+            '4h': {'weight': 0.4, 'name': '4-часовой'},
+            '1d': {'weight': 0.3, 'name': 'Дневной'},
+        }
+        self.cache = {}
+        self.cache_ttl = {
+            '1h': timedelta(minutes=15),   # Обновляем раз в 15 минут
+            '4h': timedelta(hours=1),       # Раз в час
+            '1d': timedelta(hours=4),       # Раз в 4 часа
+        }
+        
+    def get_trend_context(self, symbol):
+        """
+        Возвращает контекст тренда со старших ТФ
+        """
+        context = {
+            'trend': 'NEUTRAL',
+            'strength': 0,
+            'description': '↔️ Смешанный тренд',
+            'details': {}
+        }
+        
+        total_score = 0
+        total_weight = 0
+        
+        for tf, config in self.timeframes.items():
+            df = self._get_cached_data(symbol, tf)
+            if df is None or len(df) < 50:
+                continue
+                
+            # Анализируем тренд на этом ТФ
+            tf_trend, tf_score, tf_desc = self._analyze_timeframe(df)
+            
+            # Сохраняем детали
+            context['details'][tf] = {
+                'trend': tf_trend,
+                'score': tf_score,
+                'description': tf_desc
+            }
+            
+            # Добавляем взвешенный вклад
+            total_score += tf_score * config['weight']
+            total_weight += config['weight']
+        
+        if total_weight > 0:
+            avg_score = total_score / total_weight
+            
+            # Определяем общий тренд
+            if avg_score > 0.3:
+                context['trend'] = 'BULL'
+                context['strength'] = avg_score
+                context['description'] = f"⬆️ Бычий тренд (сила {avg_score:.2f})"
+            elif avg_score < -0.3:
+                context['trend'] = 'BEAR'
+                context['strength'] = abs(avg_score)
+                context['description'] = f"⬇️ Медвежий тренд (сила {abs(avg_score):.2f})"
+            else:
+                context['description'] = f"↔️ Флэт/смешанный тренд"
+        
+        return context
+    
+    def _get_cached_data(self, symbol, timeframe):
+        """Получает данные с кэшированием"""
+        now = datetime.now(timezone.utc)
+        cache_key = f"{symbol}_{timeframe}"
+        
+        # Проверяем кэш
+        if cache_key in self.cache:
+            data, timestamp = self.cache[cache_key]
+            if now - timestamp < self.cache_ttl[timeframe]:
+                return data
+        
+        # Загружаем свежие данные
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=100)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            # Рассчитываем индикаторы для этого ТФ
+            df['ema_20'] = TechnicalIndicators.ema(df['close'], period=20)
+            df['ema_50'] = TechnicalIndicators.ema(df['close'], period=50)
+            df['rsi'] = TechnicalIndicators.rsi(df['close'], period=14)
+            
+            # Сохраняем в кэш
+            self.cache[cache_key] = (df, now)
+            print(f"[{now}] MTF: Загружен {timeframe} для {symbol}")
+            
+            return df
+            
+        except Exception as e:
+            print(f"MTF error loading {timeframe}: {e}")
+            return None
+    
+    def _analyze_timeframe(self, df):
+        """
+        Анализирует один таймфрейм и возвращает:
+        - направление тренда (BULL/BEAR/NEUTRAL)
+        - силу тренда (-1 до 1)
+        - описание
+        """
+        last = df.iloc[-1]
+        prev = df.iloc[-5]  # 5 свечей назад
+        
+        score = 0
+        reasons = []
+        
+        # 1. EMA alignment
+        if last['ema_20'] > last['ema_50']:
+            score += 0.4
+            reasons.append("EMA20 > EMA50")
+        else:
+            score -= 0.4
+            reasons.append("EMA20 < EMA50")
+        
+        # 2. Цена относительно EMA20
+        if last['close'] > last['ema_20']:
+            score += 0.3
+            reasons.append("Цена выше EMA20")
+        else:
+            score -= 0.3
+            reasons.append("Цена ниже EMA20")
+        
+        # 3. RSI направление
+        if last['rsi'] > 50:
+            score += 0.2
+            reasons.append(f"RSI {last['rsi']:.1f} > 50")
+        else:
+            score -= 0.2
+            reasons.append(f"RSI {last['rsi']:.1f} < 50")
+        
+        # 4. Моментум (сравнение с 5 свечей назад)
+        if last['close'] > prev['close']:
+            score += 0.1
+            reasons.append("Цена растет")
+        else:
+            score -= 0.1
+            reasons.append("Цена падает")
+        
+        # Определяем направление
+        if score > 0.3:
+            trend = 'BULL'
+            desc = f"⬆️ Бычий ({', '.join(reasons[:2])})"
+        elif score < -0.3:
+            trend = 'BEAR'
+            desc = f"⬇️ Медвежий ({', '.join(reasons[:2])})"
+        else:
+            trend = 'NEUTRAL'
+            desc = f"↔️ Нейтральный"
+        
+        return trend, score, desc
+
+
 class BybitScalpingBot:
     def __init__(self):
+        # API keys from environment
         self.api_key = os.getenv('BYBIT_API_KEY')
         self.api_secret = os.getenv('BYBIT_API_SECRET')
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -148,6 +307,11 @@ class BybitScalpingBot:
                     'rsi', 'adx', 'vwap', 'ema_20', 'ema_50', 'atr', 'bb_upper', 'bb_lower',
                     'stoch_k', 'stoch_d', 'macd_hist', 'bid_ratio'
                 ])
+
+        # Добавляем мультитаймфреймовый анализатор
+        self.mtf_analyzer = MultiTimeframeAnalyzer(self.exchange)
+        self.mtf_context = {}  # Будет хранить последний контекст для каждого символа
+        self.mtf_last_update = {}  # Для отслеживания времени обновления
 
         print(f"[{datetime.now(timezone.utc)}] Bot initialized for {self.symbols}")
         self.send_telegram(f"Bot started\nSymbols: {' '.join(self.symbols)}\nTimeframe: {self.timeframe}")
@@ -227,20 +391,60 @@ class BybitScalpingBot:
             return self.cryptopanic_cache if self.cryptopanic_cache else []
 
     def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
+        """Смягченный AI фильтр с подробным промптом"""
         if not self.deepseek_api_key:
             return True
         try:
             last = df.iloc[-1]
-            news_text = "\n".join(n.get('title', '') for n in news)
-            prompt = f"""Analyze trading signal for {symbol}:
-Signal: {signal}
-Price: {last['close']}
-RSI: {last['rsi']:.2f}, ADX: {last['adx']:.2f}
-Orderbook Bid Ratio: {orderbook['bid_ratio']:.2f}%
-Coinglass L/S Ratio: {coinglass.get('longShortRatio', 'N/A')}
-Recent News: {news_text}
+            news_text = "\n".join(n.get('title', '') for n in news[:3])
+            
+            # Определяем состояние рынка для промпта
+            rsi_state = 'oversold' if last['rsi'] < 30 else 'overbought' if last['rsi'] > 70 else 'neutral'
+            adx_state = 'trending' if last['adx'] > 25 else 'ranging'
+            vwap_state = 'above' if last['close'] > last['vwap'] else 'below'
+            ema_state = 'BULLISH' if last['ema_20'] > last['ema_50'] else 'BEARISH'
+            
+            # Определяем позицию относительно Bollinger
+            if last['close'] >= last['bb_upper']:
+                bb_state = 'UPPER (overbought)'
+            elif last['close'] <= last['bb_lower']:
+                bb_state = 'LOWER (oversold)'
+            else:
+                bb_state = 'MIDDLE'
+            
+            # Определяем доминирование в стакане
+            order_flow = 'buyers' if orderbook['bid_ratio'] > 50 else 'sellers'
+            
+            prompt = f"""Analyze this {signal} scalp trade for {symbol}:
 
-Reply with ONLY "YES" or "NO" if this trade is high probability."""
+Price: ${last['close']:.2f}
+
+TECHNICAL ANALYSIS:
+• RSI: {last['rsi']:.1f} ({rsi_state})
+• ADX: {last['adx']:.1f} ({adx_state})
+• VWAP: price {vwap_state} VWAP (${last['vwap']:.2f})
+• EMA20/50: {ema_state} (20: ${last['ema_20']:.2f}, 50: ${last['ema_50']:.2f})
+• Bollinger: price at {bb_state} (upper: ${last['bb_upper']:.2f}, lower: ${last['bb_lower']:.2f})
+• ATR: ${last['atr']:.2f} (volatility measure)
+
+ORDER FLOW:
+• Bid/Ask Ratio: {orderbook['bid_ratio']:.1f}% ({order_flow} dominate)
+
+MARKET SENTIMENT:
+• Coinglass L/S: {coinglass.get('longShortRatio', 'N/A')}
+• News: {news_text[:150]}...
+
+SCALP TRADING CONTEXT:
+- Target: 0.5-1% profit
+- Stop loss: tight (1.2x ATR)
+- Holding time: minutes to hours
+- We don't need perfect setups, just decent probability
+
+QUESTION: Based on ALL available data, would you take this {signal} scalp trade?
+Reply with ONLY "YES" or "NO"."""
+            
+            print(f"[{datetime.now(timezone.utc)}] 🤔 Asking DeepSeek about {symbol} {signal}...")
+            
             res = requests.post(
                 'https://api.deepseek.com/v1/chat/completions',
                 headers={
@@ -250,16 +454,28 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 json={
                     'model': 'deepseek-chat',
                     'messages': [{'role': 'user', 'content': prompt}],
-                    'temperature': 0.1
+                    'temperature': 0.3,
+                    'max_tokens': 10
                 },
                 timeout=15
             ).json()
+            
             answer = res['choices'][0]['message']['content'].strip().upper()
-            print(f"[{datetime.now(timezone.utc)}] AI filter: {answer}")
-            return "YES" in answer
+            print(f"[{datetime.now(timezone.utc)}] 🤖 DeepSeek verdict: {answer}")
+            
+            # Проверяем наличие положительного ответа
+            positive = any(word in answer for word in ['YES', 'SURE', 'GOOD', 'OK', 'TAKE', 'YEP'])
+            
+            if positive:
+                print(f"✅ DeepSeek APPROVED {symbol} {signal}")
+            else:
+                print(f"❌ DeepSeek REJECTED {symbol} {signal}")
+            
+            return positive
+            
         except Exception as e:
-            print(f"[{datetime.now(timezone.utc)}] AI error: {e}")
-            return True
+            print(f"[{datetime.now(timezone.utc)}] ⚠️ AI error: {e}")
+            return True  # При ошибке пропускаем
 
     def calculate_indicators(self, df):
         df['vwap'] = TechnicalIndicators.vwap(df['high'], df['low'], df['close'], df['volume'])
@@ -275,7 +491,6 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
         df['adx'] = adx
         df['stoch_k'], df['stoch_d'] = TechnicalIndicators.stochastic(df['high'], df['low'], df['close'])
         df['macd'], df['macd_signal'], df['macd_hist'] = TechnicalIndicators.macd(df['close'])
-        print(f"[{datetime.now(timezone.utc)}] Indicators calculated")
         return df
 
     def check_daily_loss_limit(self):
@@ -375,6 +590,20 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
         if not self.check_daily_loss_limit():
             return None, None, None
 
+        # Обновляем контекст старших ТФ (не чаще чем раз в 15 минут)
+        now = datetime.now(timezone.utc)
+        if (symbol not in self.mtf_last_update or 
+            now - self.mtf_last_update.get(symbol, now) > timedelta(minutes=15)):
+            
+            self.mtf_context[symbol] = self.mtf_analyzer.get_trend_context(symbol)
+            self.mtf_last_update[symbol] = now
+            
+            # Выводим информацию о глобальном тренде
+            print(f"[{now}] 🌍 Глобальный тренд для {symbol}: {self.mtf_context[symbol]['description']}")
+        
+        # Получаем текущий контекст
+        context = self.mtf_context.get(symbol, {'trend': 'NEUTRAL', 'strength': 0})
+        
         last = df.iloc[-1]
         adx = last['adx']
         ob = self.fetch_orderbook_data(symbol)
@@ -410,7 +639,39 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 final_signal = trend_sig
                 final_strength = trend_strength
 
-        # ИЗМЕНЕНО: порог снижен с 0.55 до 0.35
+        # Если есть сигнал, применяем корректировку на основе глобального тренда
+        if final_signal:
+            original_strength = final_strength
+            
+            # Корректируем силу сигнала в зависимости от глобального тренда
+            if context['trend'] == 'BULL' and final_signal == 'LONG':
+                # Лонг по тренду - усиливаем
+                boost = min(0.2, context['strength'] * 0.3)
+                final_strength = min(1.0, final_strength + boost)
+                print(f"📈 Лонг по бычьему тренду: +{boost:.2f} к силе")
+                
+            elif context['trend'] == 'BEAR' and final_signal == 'SHORT':
+                # Шорт по тренду - усиливаем
+                boost = min(0.2, context['strength'] * 0.3)
+                final_strength = min(1.0, final_strength + boost)
+                print(f"📉 Шорт по медвежьему тренду: +{boost:.2f} к силе")
+                
+            elif context['trend'] == 'BULL' and final_signal == 'SHORT':
+                # Шорт против бычьего тренда - ослабляем
+                penalty = min(0.3, context['strength'] * 0.4)
+                final_strength = max(0, final_strength - penalty)
+                print(f"⚠️ Шорт против бычьего тренда: -{penalty:.2f} к силе")
+                
+            elif context['trend'] == 'BEAR' and final_signal == 'LONG':
+                # Лонг против медвежьего тренда - ослабляем
+                penalty = min(0.3, context['strength'] * 0.4)
+                final_strength = max(0, final_strength - penalty)
+                print(f"⚠️ Лонг против медвежьего тренда: -{penalty:.2f} к силе")
+            
+            if final_strength != original_strength:
+                print(f"🔄 Сила сигнала скорректирована: {original_strength:.2f} → {final_strength:.2f}")
+
+        # Порог силы сигнала 0.35 (после корректировки)
         if final_signal and final_strength >= 0.35:
             base = symbol.split('/')[0]
             cg = self.fetch_coinglass_data(base)
