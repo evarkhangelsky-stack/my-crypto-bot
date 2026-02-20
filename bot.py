@@ -91,6 +91,11 @@ class BybitScalpingBot:
         self.cryptopanic_api_key = os.getenv('CRYPTOPANIC_API_KEY')
         self.cryptopanic_api_plan = os.getenv('CRYPTOPANIC_API_PLAN', 'developer')
 
+        # Кэш для CryptoPanic
+        self.cryptopanic_cache = []
+        self.cryptopanic_cache_time = None
+        self.cryptopanic_cache_duration = timedelta(hours=1)  # Кэш на 1 час
+
         required = [self.api_key, self.api_secret, self.telegram_token, self.telegram_chat_id]
         if not all(required):
             raise ValueError("Missing required environment variables")
@@ -177,19 +182,39 @@ class BybitScalpingBot:
             return {}
 
     def fetch_cryptopanic_news(self):
+        """Запрашивает новости с кэшированием на 1 час для защиты от rate limit"""
         if not self.cryptopanic_api_key:
             return []
+
+        now = datetime.now(timezone.utc)
+        
+        # Проверяем кэш
+        if self.cryptopanic_cache and self.cryptopanic_cache_time:
+            if now - self.cryptopanic_cache_time < self.cryptopanic_cache_duration:
+                print(f"[{now}] CryptoPanic: используем кэшированные новости")
+                return self.cryptopanic_cache
+
         try:
             url = f"https://cryptopanic.com/api/{self.cryptopanic_api_plan}/v2/posts/?auth_token={self.cryptopanic_api_key}&kind=news"
             res = requests.get(url, timeout=10)
+            
+            if res.status_code == 429:
+                print(f"[{now}] CryptoPanic: rate limit (429), возвращаем кэш")
+                return self.cryptopanic_cache if self.cryptopanic_cache else []
+            
             if res.status_code != 200:
-                print(f"[{datetime.now(timezone.utc)}] CryptoPanic HTTP error: {res.status_code}")
-                return []
+                print(f"[{now}] CryptoPanic: HTTP error {res.status_code}")
+                return self.cryptopanic_cache if self.cryptopanic_cache else []
+            
             data = res.json()
-            return data.get('results', [])[:5]
+            self.cryptopanic_cache = data.get('results', [])[:5]
+            self.cryptopanic_cache_time = now
+            print(f"[{now}] CryptoPanic: загружено {len(self.cryptopanic_cache)} новостей")
+            return self.cryptopanic_cache
+            
         except Exception as e:
-            print(f"[{datetime.now(timezone.utc)}] CryptoPanic error: {e}")
-            return []
+            print(f"[{now}] CryptoPanic error: {e}")
+            return self.cryptopanic_cache if self.cryptopanic_cache else []
 
     def calculate_indicators(self, df):
         df['vwap'] = TechnicalIndicators.vwap(df['high'], df['low'], df['close'], df['volume'])
