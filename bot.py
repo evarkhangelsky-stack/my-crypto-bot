@@ -81,6 +81,7 @@ class TechnicalIndicators:
 
 class BybitScalpingBot:
     def __init__(self):
+        # API keys from environment
         self.api_key = os.getenv('BYBIT_API_KEY')
         self.api_secret = os.getenv('BYBIT_API_SECRET')
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -94,6 +95,7 @@ class BybitScalpingBot:
         if not all(required):
             raise ValueError("Missing required environment variables")
 
+        # Initialize Bybit (linear futures)
         self.exchange = ccxt.bybit({
             'apiKey': self.api_key,
             'secret': self.api_secret,
@@ -101,24 +103,29 @@ class BybitScalpingBot:
             'options': {'defaultType': 'linear'}
         })
 
+        # Настройка margin mode и leverage
         self.symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT']
         for symbol in self.symbols:
             try:
                 self.exchange.set_margin_mode('cross', symbol)
                 self.exchange.set_leverage(5, symbol)
-                print(f"[{datetime.now(timezone.UTC)}] Leverage 5x and cross for {symbol}")
+                print(f"[{datetime.now(timezone.UTC)}] Leverage 5x and cross margin for {symbol}")
             except Exception as e:
-                print(f"Error setting leverage/margin: {e}")
+                print(f"Error setting leverage/margin for {symbol}: {e}")
 
+        # Initialize Telegram
         self.bot = telebot.TeleBot(self.telegram_token)
+
+        # Trading parameters
         self.timeframe = '5m'
-        self.positions = {s: None for s in self.symbols}
+        self.positions = {symbol: None for symbol in self.symbols}
 
         self.sl_atr_multiplier = 1.2
         self.tp_atr_multiplier = 2.0
         self.trailing_stop_percent = 0.5
         self.taker_fee = 0.0006
 
+        # Daily loss limit
         self.daily_loss_limit_pct = -4.2
         self.last_day = None
         self.day_start_equity = None
@@ -141,7 +148,7 @@ class BybitScalpingBot:
             print(f"[{datetime.now(timezone.UTC)}] OHLCV fetched successfully for {symbol}, rows: {len(df)}")
             return df
         except Exception as e:
-            print(f"Error fetching OHLCV for {symbol}: {e}")
+            print(f"[{datetime.now(timezone.UTC)}] Error fetching OHLCV for {symbol}: {e}")
             return None
 
     def fetch_orderbook_data(self, symbol):
@@ -154,7 +161,7 @@ class BybitScalpingBot:
             print(f"[{datetime.now(timezone.UTC)}] Orderbook fetched for {symbol}, bid_ratio: {bid_ratio:.2f}%")
             return {'bid_ratio': bid_ratio, 'total_volume': total}
         except Exception as e:
-            print(f"Error fetching orderbook for {symbol}: {e}")
+            print(f"[{datetime.now(timezone.UTC)}] Error fetching orderbook for {symbol}: {e}")
             return {'bid_ratio': 50, 'total_volume': 0}
 
     def fetch_coinglass_data(self, symbol_base):
@@ -176,48 +183,13 @@ class BybitScalpingBot:
             url = f"https://cryptopanic.com/api/{self.cryptopanic_api_plan}/v2/posts/?auth_token={self.cryptopanic_api_key}&kind=news"
             res = requests.get(url, timeout=10)
             if res.status_code != 200:
+                print(f"[{datetime.now(timezone.UTC)}] CryptoPanic HTTP error: {res.status_code}")
                 return []
             data = res.json()
             return data.get('results', [])[:5]
         except Exception as e:
-            print(f"CryptoPanic error: {e}")
+            print(f"[{datetime.now(timezone.UTC)}] CryptoPanic error: {e}")
             return []
-
-    def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
-        if not self.deepseek_api_key:
-            return True
-        try:
-            last = df.iloc[-1]
-            news_text = "\n".join(n.get('title', '') for n in news)
-            prompt = f"""Analyze trading signal for {symbol}:
-Signal: {signal}
-Price: {last['close']}
-RSI: {last['rsi']:.2f}, ADX: {last['adx']:.2f}
-Orderbook Bid Ratio: {orderbook['bid_ratio']:.2f}%
-Coinglass L/S Ratio: {coinglass.get('longShortRatio', 'N/A')}
-Recent News: {news_text}
-
-Reply with ONLY "YES" or "NO" if this trade is high probability."""
-            
-            res = requests.post(
-                'https://api.deepseek.com/v1/chat/completions',
-                headers={
-                    'Authorization': f'Bearer {self.deepseek_api_key}',
-                    'Content-Type': 'application/json'
-                },
-                json={
-                    'model': 'deepseek-chat',
-                    'messages': [{'role': 'user', 'content': prompt}],
-                    'temperature': 0.1
-                },
-                timeout=15
-            ).json()
-            answer = res['choices'][0]['message']['content'].strip().upper()
-            print(f"[{datetime.now(timezone.UTC)}] AI filter: {answer}")
-            return "YES" in answer
-        except Exception as e:
-            print(f"AI error: {e}")
-            return True
 
     def calculate_indicators(self, df):
         df['vwap'] = TechnicalIndicators.vwap(df['high'], df['low'], df['close'], df['volume'])
@@ -235,6 +207,41 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
         df['macd'], df['macd_signal'], df['macd_hist'] = TechnicalIndicators.macd(df['close'])
         print(f"[{datetime.now(timezone.UTC)}] Indicators calculated")
         return df
+
+    def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
+        if not self.deepseek_api_key:
+            return True
+        try:
+            last = df.iloc[-1]
+            news_text = "\n".join(n.get('title', '') for n in news)
+            prompt = f"""Analyze trading signal for {symbol}:
+Signal: {signal}
+Price: {last['close']}
+RSI: {last['rsi']:.2f}, ADX: {last['adx']:.2f}
+Orderbook Bid Ratio: {orderbook['bid_ratio']:.2f}%
+Coinglass L/S Ratio: {coinglass.get('longShortRatio', 'N/A')}
+Recent News: {news_text}
+
+Reply with ONLY "YES" or "NO" if this trade is high probability."""
+            res = requests.post(
+                'https://api.deepseek.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {self.deepseek_api_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'deepseek-chat',
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0.1
+                },
+                timeout=15
+            ).json()
+            answer = res['choices'][0]['message']['content'].strip().upper()
+            print(f"[{datetime.now(timezone.UTC)}] AI filter: {answer}")
+            return "YES" in answer
+        except Exception as e:
+            print(f"[{datetime.now(timezone.UTC)}] AI error: {e}")
+            return True
 
     def check_daily_loss_limit(self):
         now = datetime.now(timezone.UTC)
@@ -315,16 +322,26 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
             return None, None, None
 
         last = df.iloc[-1]
+        price = last['close']
+        rsi = last['rsi']
         adx = last['adx']
-        
-        # Логирование для отладки
-        print(f"[{datetime.now(timezone.UTC)}] {symbol} - Price: {last['close']:.2f}, "
-              f"RSI: {last['rsi']:.2f}, ADX: {adx:.2f}, "
-              f"BB Lower: {last['bb_lower']:.2f}, BB Upper: {last['bb_upper']:.2f}, "
-              f"VWAP: {last['vwap']:.2f}, EMA20: {last['ema_20']:.2f}, EMA50: {last['ema_50']:.2f}")
-        
-        ob = self.fetch_orderbook_data(symbol)
+        vwap = last['vwap']
+        atr = last['atr']
+        bb_upper = last['bb_upper']
+        bb_lower = last['bb_lower']
+        ema_20 = last['ema_20']
+        ema_50 = last['ema_50']
 
+        print(f"[{datetime.now(timezone.UTC)}] {symbol} values: Price={price:.2f}, RSI={rsi:.2f}, ADX={adx:.2f}, VWAP={vwap:.2f}, EMA20={ema_20:.2f}, EMA50={ema_50:.2f}, ATR={atr:.2f}, BB Upper={bb_upper:.2f}, BB Lower={bb_lower:.2f}")
+
+        if pd.isna([price, rsi, adx, vwap, atr]).any():
+            print(f"[{datetime.now(timezone.UTC)}] NaN in indicators for {symbol} — no signal")
+            return None, None, None
+
+        ob = self.fetch_orderbook_data(symbol)
+        bid_ratio = ob['bid_ratio']
+
+        # Используем новые стратегии с силой сигнала
         side_sig, side_strength = self.sideways_strategy(df, ob)
         trend_sig, trend_strength = self.trend_strategy(df, ob)
 
@@ -365,9 +382,8 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 print(f"[{datetime.now(timezone.UTC)}] AI отклонил сигнал {final_signal} для {symbol}")
                 return None, None, None
 
-            entry = last['close']
-            fee_adj = entry * self.taker_fee
-            atr = last['atr']
+            entry = price
+            fee_adj = price * self.taker_fee
             if final_signal == 'LONG':
                 sl = entry - (self.sl_atr_multiplier * atr) - fee_adj
                 tp = entry + (self.tp_atr_multiplier * atr) + fee_adj
@@ -384,16 +400,21 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
     def get_balance(self):
         try:
             bal = self.exchange.fetch_balance()
-            if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
+            print(f"[{datetime.now(timezone.UTC)}] Полный ответ fetch_balance: {bal}")
+            if 'USDT' in bal and 'free' in bal['USDT']:
+                usdt_free = float(bal['USDT']['free'])
+                print(f"[{datetime.now(timezone.UTC)}] USDT free balance: {usdt_free}")
+                return usdt_free
+            elif 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
                 equity = float(bal['info']['result']['list'][0]['totalEquity'])
-                print(f"[{datetime.now(timezone.UTC)}] Баланс: totalEquity = {equity:.2f} USDT")
+                print(f"[{datetime.now(timezone.UTC)}] Total equity: {equity:.2f} USDT")
                 return equity
             else:
                 print(f"[{datetime.now(timezone.UTC)}] USDT не найден в ответе баланса")
-                return 0.0
+                return 100.0
         except Exception as e:
             print(f"[{datetime.now(timezone.UTC)}] BALANCE FETCH FAILED: {str(e)}")
-            return 0.0
+            return 100.0
 
     def place_order(self, symbol, signal, params):
         try:
