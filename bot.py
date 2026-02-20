@@ -406,7 +406,8 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 final_signal = trend_sig
                 final_strength = trend_strength
 
-        if final_signal and final_strength >= 0.55:
+        # ИЗМЕНЕНО: порог снижен с 0.55 до 0.50
+        if final_signal and final_strength >= 0.50:
             base = symbol.split('/')[0]
             cg = self.fetch_coinglass_data(base)
             news = self.fetch_cryptopanic_news()
