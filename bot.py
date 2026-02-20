@@ -4,7 +4,7 @@ import ccxt
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import telebot
 
 class TechnicalIndicators:
@@ -106,7 +106,7 @@ class BybitScalpingBot:
             try:
                 self.exchange.set_margin_mode('cross', symbol)
                 self.exchange.set_leverage(5, symbol)
-                print(f"[{datetime.now()}] Leverage 5x and cross for {symbol}")
+                print(f"[{datetime.now(timezone.UTC)}] Leverage 5x and cross for {symbol}")
             except Exception as e:
                 print(f"Error setting leverage/margin: {e}")
 
@@ -124,7 +124,7 @@ class BybitScalpingBot:
         self.day_start_equity = None
         self.trading_paused_until = None
 
-        print(f"[{datetime.now()}] Bot initialized for {self.symbols}")
+        print(f"[{datetime.now(timezone.UTC)}] Bot initialized for {self.symbols}")
         self.send_telegram(f"Bot started\nSymbols: {' '.join(self.symbols)}\nTimeframe: {self.timeframe}")
 
     def send_telegram(self, message):
@@ -138,7 +138,7 @@ class BybitScalpingBot:
             ohlcv = self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            print(f"[{datetime.now()}] OHLCV fetched successfully for {symbol}, rows: {len(df)}")
+            print(f"[{datetime.now(timezone.UTC)}] OHLCV fetched successfully for {symbol}, rows: {len(df)}")
             return df
         except Exception as e:
             print(f"Error fetching OHLCV for {symbol}: {e}")
@@ -151,11 +151,73 @@ class BybitScalpingBot:
             total_asks = sum(ask[1] for ask in orderbook['asks'])
             total = total_bids + total_asks
             bid_ratio = (total_bids / total) * 100 if total > 0 else 50
-            print(f"[{datetime.now()}] Orderbook fetched for {symbol}, bid_ratio: {bid_ratio:.2f}%")
+            print(f"[{datetime.now(timezone.UTC)}] Orderbook fetched for {symbol}, bid_ratio: {bid_ratio:.2f}%")
             return {'bid_ratio': bid_ratio, 'total_volume': total}
         except Exception as e:
             print(f"Error fetching orderbook for {symbol}: {e}")
             return {'bid_ratio': 50, 'total_volume': 0}
+
+    def fetch_coinglass_data(self, symbol_base):
+        if not self.coinglass_api_key:
+            return {}
+        try:
+            headers = {'cg-api-key': self.coinglass_api_key}
+            url = f"https://open-api.coinglass.com/public/v2/long_short?symbol={symbol_base}&time_type=h1"
+            res = requests.get(url, headers=headers, timeout=10).json()
+            return res.get('data', [])[0] if res.get('success') else {}
+        except Exception as e:
+            print(f"Coinglass error: {e}")
+            return {}
+
+    def fetch_cryptopanic_news(self):
+        if not self.cryptopanic_api_key:
+            return []
+        try:
+            url = f"https://cryptopanic.com/api/{self.cryptopanic_api_plan}/v2/posts/?auth_token={self.cryptopanic_api_key}&kind=news"
+            res = requests.get(url, timeout=10)
+            if res.status_code != 200:
+                return []
+            data = res.json()
+            return data.get('results', [])[:5]
+        except Exception as e:
+            print(f"CryptoPanic error: {e}")
+            return []
+
+    def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
+        if not self.deepseek_api_key:
+            return True
+        try:
+            last = df.iloc[-1]
+            news_text = "\n".join(n.get('title', '') for n in news)
+            prompt = f"""Analyze trading signal for {symbol}:
+Signal: {signal}
+Price: {last['close']}
+RSI: {last['rsi']:.2f}, ADX: {last['adx']:.2f}
+Orderbook Bid Ratio: {orderbook['bid_ratio']:.2f}%
+Coinglass L/S Ratio: {coinglass.get('longShortRatio', 'N/A')}
+Recent News: {news_text}
+
+Reply with ONLY "YES" or "NO" if this trade is high probability."""
+            
+            res = requests.post(
+                'https://api.deepseek.com/v1/chat/completions',
+                headers={
+                    'Authorization': f'Bearer {self.deepseek_api_key}',
+                    'Content-Type': 'application/json'
+                },
+                json={
+                    'model': 'deepseek-chat',
+                    'messages': [{'role': 'user', 'content': prompt}],
+                    'temperature': 0.1
+                },
+                timeout=15
+            ).json()
+            answer = res['choices'][0]['message']['content'].strip().upper()
+            print(f"[{datetime.now(timezone.UTC)}] AI filter: {answer}")
+            return "YES" in answer
+        except Exception as e:
+            print(f"AI error: {e}")
+            return True
 
     def calculate_indicators(self, df):
         df['vwap'] = TechnicalIndicators.vwap(df['high'], df['low'], df['close'], df['volume'])
@@ -171,11 +233,11 @@ class BybitScalpingBot:
         df['adx'] = adx
         df['stoch_k'], df['stoch_d'] = TechnicalIndicators.stochastic(df['high'], df['low'], df['close'])
         df['macd'], df['macd_signal'], df['macd_hist'] = TechnicalIndicators.macd(df['close'])
-        print(f"[{datetime.now()}] Indicators calculated")
+        print(f"[{datetime.now(timezone.UTC)}] Indicators calculated")
         return df
 
     def check_daily_loss_limit(self):
-        now = datetime.utcnow()
+        now = datetime.now(timezone.UTC)
         current_day = now.date()
 
         if self.last_day != current_day:
@@ -254,6 +316,13 @@ class BybitScalpingBot:
 
         last = df.iloc[-1]
         adx = last['adx']
+        
+        # Логирование для отладки
+        print(f"[{datetime.now(timezone.UTC)}] {symbol} - Price: {last['close']:.2f}, "
+              f"RSI: {last['rsi']:.2f}, ADX: {adx:.2f}, "
+              f"BB Lower: {last['bb_lower']:.2f}, BB Upper: {last['bb_upper']:.2f}, "
+              f"VWAP: {last['vwap']:.2f}, EMA20: {last['ema_20']:.2f}, EMA50: {last['ema_50']:.2f}")
+        
         ob = self.fetch_orderbook_data(symbol)
 
         side_sig, side_strength = self.sideways_strategy(df, ob)
@@ -293,7 +362,7 @@ class BybitScalpingBot:
             news = self.fetch_cryptopanic_news()
 
             if not self.get_ai_filter(symbol, df, final_signal, ob, cg, news):
-                print(f"[{datetime.now()}] AI отклонил сигнал {final_signal} для {symbol}")
+                print(f"[{datetime.now(timezone.UTC)}] AI отклонил сигнал {final_signal} для {symbol}")
                 return None, None, None
 
             entry = last['close']
@@ -306,10 +375,10 @@ class BybitScalpingBot:
                 sl = entry + (self.sl_atr_multiplier * atr) + fee_adj
                 tp = entry - (self.tp_atr_multiplier * atr) - fee_adj
 
-            print(f"[{datetime.now()}] Сигнал {final_signal} (сила {final_strength:.2f}) для {symbol}")
+            print(f"[{datetime.now(timezone.UTC)}] СИГНАЛ! {final_signal} (сила {final_strength:.2f}) для {symbol}")
             return final_signal, "Scalp", {'entry': entry, 'stop_loss': sl, 'take_profit': tp}
 
-        print(f"[{datetime.now()}] Нет сильного сигнала (сила {final_strength:.2f}) для {symbol}")
+        print(f"[{datetime.now(timezone.UTC)}] Нет сильного сигнала (сила {final_strength:.2f}) для {symbol}")
         return None, None, None
 
     def get_balance(self):
@@ -317,29 +386,134 @@ class BybitScalpingBot:
             bal = self.exchange.fetch_balance()
             if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
                 equity = float(bal['info']['result']['list'][0]['totalEquity'])
-                print(f"[{datetime.now()}] Баланс: totalEquity = {equity:.2f} USDT")
+                print(f"[{datetime.now(timezone.UTC)}] Баланс: totalEquity = {equity:.2f} USDT")
                 return equity
             else:
-                print(f"[{datetime.now()}] USDT не найден в ответе баланса")
+                print(f"[{datetime.now(timezone.UTC)}] USDT не найден в ответе баланса")
                 return 0.0
         except Exception as e:
-            print(f"[{datetime.now()}] BALANCE FETCH FAILED: {str(e)}")
+            print(f"[{datetime.now(timezone.UTC)}] BALANCE FETCH FAILED: {str(e)}")
             return 0.0
 
-    # Здесь должны быть все остальные методы из твоего кода без изменений:
-    # fetch_coinglass_data, fetch_cryptopanic_news, get_ai_filter,
-    # place_order, manage_position, close_position, run
+    def place_order(self, symbol, signal, params):
+        try:
+            balance = self.get_balance()
+            if balance <= 0:
+                print(f"[{datetime.now(timezone.UTC)}] Нулевой баланс, пропускаем ордер")
+                return
+                
+            risk = balance * 0.01  # 1% risk per trade
+            size = risk / abs(params['entry'] - params['stop_loss'])
+            
+            # Округляем до допустимого размера для Bybit
+            if symbol.startswith('BTC'):
+                size = round(size, 3)  # BTC допускает 0.001 точность
+            else:
+                size = round(size, 2)  # ETH допускает 0.01 точность
 
-    # Пример run (с вызовом баланса):
+            if size <= 0:
+                print(f"[{datetime.now(timezone.UTC)}] Размер позиции слишком мал: {size}")
+                return
+
+            msg = (
+                f"📉 *Сигнал: {symbol}*\n"
+                f"{signal} ({params['entry']:.2f})\n"
+                f"SL: {params['stop_loss']:.2f}\n"
+                f"TP: {params['take_profit']:.2f}\n"
+                f"Размер: {size}"
+            )
+            self.send_telegram(msg)
+
+            # Реальные ордера
+            if signal == 'LONG':
+                order = self.exchange.create_market_buy_order(symbol, size)
+            else:
+                order = self.exchange.create_market_sell_order(symbol, size)
+
+            actual_entry = order.get('average') or params['entry']
+            params['entry'] = actual_entry
+
+            self.positions[symbol] = {
+                'side': signal,
+                'entry': params['entry'],
+                'stop_loss': params['stop_loss'],
+                'take_profit': params['take_profit'],
+                'size': size,
+                'trailing_stop_activated': False
+            }
+            print(f"[{datetime.now(timezone.UTC)}] Order placed: {signal} {size} for {symbol}")
+            self.send_telegram(f"✅ Ордер исполнен: {signal} {size} {symbol} по {actual_entry:.2f}")
+
+        except Exception as e:
+            print(f"[{datetime.now(timezone.UTC)}] Order error for {symbol}: {e}")
+            self.send_telegram(f"❌ Ошибка ордера {symbol}: {str(e)[:100]}")
+
+    def manage_position(self, symbol, df):
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
+
+        curr = df.iloc[-1]['close']
+        side = pos['side']
+        entry = pos['entry']
+        sl = pos['stop_loss']
+        tp = pos['take_profit']
+
+        if side == 'LONG':
+            pnl_pct = ((curr - entry) / entry) * 100
+        else:
+            pnl_pct = ((entry - curr) / entry) * 100
+
+        if (side == 'LONG' and curr <= sl) or (side == 'SHORT' and curr >= sl):
+            self.close_position(symbol, curr, 'SL Hit')
+        elif (side == 'LONG' and curr >= tp) or (side == 'SHORT' and curr <= tp):
+            self.close_position(symbol, curr, 'TP Hit')
+        elif pnl_pct > self.trailing_stop_percent and not pos['trailing_stop_activated']:
+            pos['stop_loss'] = entry
+            pos['trailing_stop_activated'] = True
+            self.send_telegram(f'🔒 Trailing: {symbol} to Breakeven')
+
+        print(f"[{datetime.now(timezone.UTC)}] Position checked for {symbol}, PNL %: {pnl_pct:.2f}")
+
+    def close_position(self, symbol, price, reason):
+        pos = self.positions.get(symbol)
+        if not pos:
+            return
+
+        if pos['side'] == 'LONG':
+            pnl = (price - pos['entry']) * pos['size']
+        else:
+            pnl = (pos['entry'] - price) * pos['size']
+
+        # Реальное закрытие позиции
+        try:
+            if pos['side'] == 'LONG':
+                self.exchange.create_market_sell_order(symbol, pos['size'])
+            else:
+                self.exchange.create_market_buy_order(symbol, pos['size'])
+            
+            msg = (
+                f"🔴 *Закрыта {symbol}*\n"
+                f"Причина: {reason}\n"
+                f"P&L: ${pnl:.2f}"
+            )
+            self.send_telegram(msg)
+            print(f"[{datetime.now(timezone.UTC)}] Position closed for {symbol}: {reason}, P&L: ${pnl:.2f}")
+        except Exception as e:
+            print(f"[{datetime.now(timezone.UTC)}] Close order error for {symbol}: {e}")
+            self.send_telegram(f"❌ Ошибка закрытия {symbol}: {str(e)[:100]}")
+
+        self.positions[symbol] = None
+
     def run(self):
         while True:
-            print(f"[{datetime.now()}] Starting new cycle")
-            self.get_balance()  # мониторим баланс каждый цикл
+            print(f"[{datetime.now(timezone.UTC)}] Starting new cycle")
+            self.get_balance()
             for symbol in self.symbols:
                 try:
                     df = self.fetch_ohlcv(symbol)
                     if df is None:
-                        print(f"[{datetime.now()}] Skipping {symbol} - no data")
+                        print(f"[{datetime.now(timezone.UTC)}] Skipping {symbol} - no data")
                         continue
                     df = self.calculate_indicators(df)
 
@@ -350,8 +524,8 @@ class BybitScalpingBot:
                         if signal:
                             self.place_order(symbol, signal, params)
                 except Exception as e:
-                    print(f"[{datetime.now()}] Error for {symbol}: {e}")
-            print(f"[{datetime.now()}] Cycle finished, sleeping 30s")
+                    print(f"[{datetime.now(timezone.UTC)}] Error for {symbol}: {e}")
+            print(f"[{datetime.now(timezone.UTC)}] Cycle finished, sleeping 30s")
             time.sleep(30)
 
 
