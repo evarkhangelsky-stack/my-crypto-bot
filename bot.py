@@ -10,7 +10,83 @@ import csv
 
 class TechnicalIndicators:
     """Собственные технические индикаторы"""
-    # ... (все методы остаются без изменений)
+
+    @staticmethod
+    def vwap(high, low, close, volume):
+        """Volume Weighted Average Price"""
+        typical_price = (high + low + close) / 3
+        return (typical_price * volume).cumsum() / volume.cumsum()
+
+    @staticmethod
+    def rsi(close, period=14):
+        """Relative Strength Index"""
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+        rs = gain / loss
+        return 100 - (100 / (1 + rs))
+
+    @staticmethod
+    def ema(close, period):
+        """Exponential Moving Average"""
+        return close.ewm(span=period, adjust=False).mean()
+
+    @staticmethod
+    def atr(high, low, close, period=14):
+        """Average True Range"""
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        return tr.rolling(window=period).mean()
+
+    @staticmethod
+    def bollinger_bands(close, period=20, std=2):
+        """Bollinger Bands"""
+        middle = close.rolling(window=period).mean()
+        std_dev = close.rolling(window=period).std()
+        upper = middle + (std_dev * std)
+        lower = middle - (std_dev * std)
+        return upper, middle, lower
+
+    @staticmethod
+    def adx(high, low, close, period=14):
+        """Average Directional Index"""
+        plus_dm = high.diff()
+        minus_dm = -low.diff()
+        plus_dm[plus_dm < 0] = 0
+        minus_dm[minus_dm < 0] = 0
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+        dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+        adx = dx.rolling(window=period).mean()
+        return adx, plus_di, minus_di
+
+    @staticmethod
+    def stochastic(high, low, close, k_period=14, d_period=3, smooth_k=3):
+        """Stochastic Oscillator"""
+        lowest_low = low.rolling(window=k_period).min()
+        highest_high = high.rolling(window=k_period).max()
+        k = 100 * ((close - lowest_low) / (highest_high - lowest_low))
+        k_smooth = k.rolling(window=smooth_k).mean()
+        d = k_smooth.rolling(window=d_period).mean()
+        return k_smooth, d
+
+    @staticmethod
+    def macd(close, fast=12, slow=26, signal=9):
+        """MACD Indicator"""
+        ema_fast = close.ewm(span=fast, adjust=False).mean()
+        ema_slow = close.ewm(span=slow, adjust=False).mean()
+        macd_line = ema_fast - ema_slow
+        signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+        histogram = macd_line - signal_line
+        return macd_line, signal_line, histogram
+
 
 class BybitScalpingBot:
     def __init__(self):
@@ -125,6 +201,7 @@ class BybitScalpingBot:
         
         if self.cryptopanic_cache and self.cryptopanic_cache_time:
             if now - self.cryptopanic_cache_time < self.cryptopanic_cache_duration:
+                print(f"[{now}] CryptoPanic: используем кэшированные новости")
                 return self.cryptopanic_cache
 
         try:
@@ -132,18 +209,21 @@ class BybitScalpingBot:
             res = requests.get(url, timeout=10)
             
             if res.status_code == 429:
+                print(f"[{now}] CryptoPanic: rate limit (429), возвращаем кэш")
                 return self.cryptopanic_cache if self.cryptopanic_cache else []
             
             if res.status_code != 200:
+                print(f"[{now}] CryptoPanic: HTTP error {res.status_code}")
                 return self.cryptopanic_cache if self.cryptopanic_cache else []
             
             data = res.json()
             self.cryptopanic_cache = data.get('results', [])[:5]
             self.cryptopanic_cache_time = now
+            print(f"[{now}] CryptoPanic: загружено {len(self.cryptopanic_cache)} новостей")
             return self.cryptopanic_cache
             
         except Exception as e:
-            print(f"CryptoPanic error: {e}")
+            print(f"[{now}] CryptoPanic error: {e}")
             return self.cryptopanic_cache if self.cryptopanic_cache else []
 
     def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
@@ -175,9 +255,10 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 timeout=15
             ).json()
             answer = res['choices'][0]['message']['content'].strip().upper()
+            print(f"[{datetime.now(timezone.utc)}] AI filter: {answer}")
             return "YES" in answer
         except Exception as e:
-            print(f"AI error: {e}")
+            print(f"[{datetime.now(timezone.utc)}] AI error: {e}")
             return True
 
     def calculate_indicators(self, df):
@@ -194,6 +275,7 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
         df['adx'] = adx
         df['stoch_k'], df['stoch_d'] = TechnicalIndicators.stochastic(df['high'], df['low'], df['close'])
         df['macd'], df['macd_signal'], df['macd_hist'] = TechnicalIndicators.macd(df['close'])
+        print(f"[{datetime.now(timezone.utc)}] Indicators calculated")
         return df
 
     def check_daily_loss_limit(self):
