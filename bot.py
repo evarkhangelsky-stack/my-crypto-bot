@@ -109,7 +109,7 @@ class BybitScalpingBot:
             try:
                 self.exchange.set_margin_mode('cross', symbol)
                 self.exchange.set_leverage(5, symbol)
-                print(f"[{datetime.now(timezone.UTC)}] Leverage 5x and cross margin for {symbol}")
+                print(f"[{datetime.now(timezone.utc)}] Leverage 5x and cross margin for {symbol}")
             except Exception as e:
                 print(f"Error setting leverage/margin for {symbol}: {e}")
 
@@ -131,7 +131,7 @@ class BybitScalpingBot:
         self.day_start_equity = None
         self.trading_paused_until = None
 
-        print(f"[{datetime.now(timezone.UTC)}] Bot initialized for {self.symbols}")
+        print(f"[{datetime.now(timezone.utc)}] Bot initialized for {self.symbols}")
         self.send_telegram(f"Bot started\nSymbols: {' '.join(self.symbols)}\nTimeframe: {self.timeframe}")
 
     def send_telegram(self, message):
@@ -145,10 +145,10 @@ class BybitScalpingBot:
             ohlcv = self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            print(f"[{datetime.now(timezone.UTC)}] OHLCV fetched successfully for {symbol}, rows: {len(df)}")
+            print(f"[{datetime.now(timezone.utc)}] OHLCV fetched successfully for {symbol}, rows: {len(df)}")
             return df
         except Exception as e:
-            print(f"[{datetime.now(timezone.UTC)}] Error fetching OHLCV for {symbol}: {e}")
+            print(f"[{datetime.now(timezone.utc)}] Error fetching OHLCV for {symbol}: {e}")
             return None
 
     def fetch_orderbook_data(self, symbol):
@@ -158,10 +158,10 @@ class BybitScalpingBot:
             total_asks = sum(ask[1] for ask in orderbook['asks'])
             total = total_bids + total_asks
             bid_ratio = (total_bids / total) * 100 if total > 0 else 50
-            print(f"[{datetime.now(timezone.UTC)}] Orderbook fetched for {symbol}, bid_ratio: {bid_ratio:.2f}%")
+            print(f"[{datetime.now(timezone.utc)}] Orderbook fetched for {symbol}, bid_ratio: {bid_ratio:.2f}%")
             return {'bid_ratio': bid_ratio, 'total_volume': total}
         except Exception as e:
-            print(f"[{datetime.now(timezone.UTC)}] Error fetching orderbook for {symbol}: {e}")
+            print(f"[{datetime.now(timezone.utc)}] Error fetching orderbook for {symbol}: {e}")
             return {'bid_ratio': 50, 'total_volume': 0}
 
     def fetch_coinglass_data(self, symbol_base):
@@ -183,12 +183,12 @@ class BybitScalpingBot:
             url = f"https://cryptopanic.com/api/{self.cryptopanic_api_plan}/v2/posts/?auth_token={self.cryptopanic_api_key}&kind=news"
             res = requests.get(url, timeout=10)
             if res.status_code != 200:
-                print(f"[{datetime.now(timezone.UTC)}] CryptoPanic HTTP error: {res.status_code}")
+                print(f"[{datetime.now(timezone.utc)}] CryptoPanic HTTP error: {res.status_code}")
                 return []
             data = res.json()
             return data.get('results', [])[:5]
         except Exception as e:
-            print(f"[{datetime.now(timezone.UTC)}] CryptoPanic error: {e}")
+            print(f"[{datetime.now(timezone.utc)}] CryptoPanic error: {e}")
             return []
 
     def calculate_indicators(self, df):
@@ -205,7 +205,7 @@ class BybitScalpingBot:
         df['adx'] = adx
         df['stoch_k'], df['stoch_d'] = TechnicalIndicators.stochastic(df['high'], df['low'], df['close'])
         df['macd'], df['macd_signal'], df['macd_hist'] = TechnicalIndicators.macd(df['close'])
-        print(f"[{datetime.now(timezone.UTC)}] Indicators calculated")
+        print(f"[{datetime.now(timezone.utc)}] Indicators calculated")
         return df
 
     def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
@@ -237,20 +237,24 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 timeout=15
             ).json()
             answer = res['choices'][0]['message']['content'].strip().upper()
-            print(f"[{datetime.now(timezone.UTC)}] AI filter: {answer}")
+            print(f"[{datetime.now(timezone.utc)}] AI filter: {answer}")
             return "YES" in answer
         except Exception as e:
-            print(f"[{datetime.now(timezone.UTC)}] AI error: {e}")
+            print(f"[{datetime.now(timezone.utc)}] AI error: {e}")
             return True
 
     def check_daily_loss_limit(self):
-        now = datetime.now(timezone.UTC)
+        now = datetime.now(timezone.utc)
         current_day = now.date()
 
         if self.last_day != current_day:
             try:
                 bal = self.exchange.fetch_balance()
-                equity = float(bal['info']['result']['list'][0]['totalEquity'])
+                if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
+                    equity = float(bal['info']['result']['list'][0]['totalEquity'])
+                else:
+                    equity = float(bal['USDT']['total']) if 'USDT' in bal and 'total' in bal['USDT'] else 100.0
+                
                 self.day_start_equity = equity
                 self.last_day = current_day
                 self.trading_paused_until = None
@@ -269,7 +273,11 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
 
         try:
             bal = self.exchange.fetch_balance()
-            current_equity = float(bal['info']['result']['list'][0]['totalEquity'])
+            if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
+                current_equity = float(bal['info']['result']['list'][0]['totalEquity'])
+            else:
+                current_equity = float(bal['USDT']['total']) if 'USDT' in bal and 'total' in bal['USDT'] else 100.0
+                
             pnl_pct = (current_equity - self.day_start_equity) / self.day_start_equity * 100
             print(f"[{now}] Текущий PnL дня: {pnl_pct:.2f}% (начало: {self.day_start_equity:.2f}, сейчас: {current_equity:.2f})")
 
@@ -332,10 +340,10 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
         ema_20 = last['ema_20']
         ema_50 = last['ema_50']
 
-        print(f"[{datetime.now(timezone.UTC)}] {symbol} values: Price={price:.2f}, RSI={rsi:.2f}, ADX={adx:.2f}, VWAP={vwap:.2f}, EMA20={ema_20:.2f}, EMA50={ema_50:.2f}, ATR={atr:.2f}, BB Upper={bb_upper:.2f}, BB Lower={bb_lower:.2f}")
+        print(f"[{datetime.now(timezone.utc)}] {symbol} values: Price={price:.2f}, RSI={rsi:.2f}, ADX={adx:.2f}, VWAP={vwap:.2f}, EMA20={ema_20:.2f}, EMA50={ema_50:.2f}, ATR={atr:.2f}, BB Upper={bb_upper:.2f}, BB Lower={bb_lower:.2f}")
 
         if pd.isna([price, rsi, adx, vwap, atr]).any():
-            print(f"[{datetime.now(timezone.UTC)}] NaN in indicators for {symbol} — no signal")
+            print(f"[{datetime.now(timezone.utc)}] NaN in indicators for {symbol} — no signal")
             return None, None, None
 
         ob = self.fetch_orderbook_data(symbol)
@@ -379,7 +387,7 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
             news = self.fetch_cryptopanic_news()
 
             if not self.get_ai_filter(symbol, df, final_signal, ob, cg, news):
-                print(f"[{datetime.now(timezone.UTC)}] AI отклонил сигнал {final_signal} для {symbol}")
+                print(f"[{datetime.now(timezone.utc)}] AI отклонил сигнал {final_signal} для {symbol}")
                 return None, None, None
 
             entry = price
@@ -391,36 +399,35 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 sl = entry + (self.sl_atr_multiplier * atr) + fee_adj
                 tp = entry - (self.tp_atr_multiplier * atr) - fee_adj
 
-            print(f"[{datetime.now(timezone.UTC)}] СИГНАЛ! {final_signal} (сила {final_strength:.2f}) для {symbol}")
+            print(f"[{datetime.now(timezone.utc)}] СИГНАЛ! {final_signal} (сила {final_strength:.2f}) для {symbol}")
             return final_signal, "Scalp", {'entry': entry, 'stop_loss': sl, 'take_profit': tp}
 
-        print(f"[{datetime.now(timezone.UTC)}] Нет сильного сигнала (сила {final_strength:.2f}) для {symbol}")
+        print(f"[{datetime.now(timezone.utc)}] Нет сильного сигнала (сила {final_strength:.2f}) для {symbol}")
         return None, None, None
 
     def get_balance(self):
         try:
             bal = self.exchange.fetch_balance()
-            print(f"[{datetime.now(timezone.UTC)}] Полный ответ fetch_balance: {bal}")
-            if 'USDT' in bal and 'free' in bal['USDT']:
-                usdt_free = float(bal['USDT']['free'])
-                print(f"[{datetime.now(timezone.UTC)}] USDT free balance: {usdt_free}")
-                return usdt_free
-            elif 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
+            if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
                 equity = float(bal['info']['result']['list'][0]['totalEquity'])
-                print(f"[{datetime.now(timezone.UTC)}] Total equity: {equity:.2f} USDT")
+                print(f"[{datetime.now(timezone.utc)}] Total equity: {equity:.2f} USDT")
                 return equity
+            elif 'USDT' in bal and 'free' in bal['USDT']:
+                usdt_free = float(bal['USDT']['free'])
+                print(f"[{datetime.now(timezone.utc)}] USDT free balance: {usdt_free}")
+                return usdt_free
             else:
-                print(f"[{datetime.now(timezone.UTC)}] USDT не найден в ответе баланса")
+                print(f"[{datetime.now(timezone.utc)}] USDT не найден в ответе баланса")
                 return 100.0
         except Exception as e:
-            print(f"[{datetime.now(timezone.UTC)}] BALANCE FETCH FAILED: {str(e)}")
+            print(f"[{datetime.now(timezone.utc)}] BALANCE FETCH FAILED: {str(e)}")
             return 100.0
 
     def place_order(self, symbol, signal, params):
         try:
             balance = self.get_balance()
             if balance <= 0:
-                print(f"[{datetime.now(timezone.UTC)}] Нулевой баланс, пропускаем ордер")
+                print(f"[{datetime.now(timezone.utc)}] Нулевой баланс, пропускаем ордер")
                 return
                 
             risk = balance * 0.01  # 1% risk per trade
@@ -433,7 +440,7 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 size = round(size, 2)  # ETH допускает 0.01 точность
 
             if size <= 0:
-                print(f"[{datetime.now(timezone.UTC)}] Размер позиции слишком мал: {size}")
+                print(f"[{datetime.now(timezone.utc)}] Размер позиции слишком мал: {size}")
                 return
 
             msg = (
@@ -462,11 +469,11 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 'size': size,
                 'trailing_stop_activated': False
             }
-            print(f"[{datetime.now(timezone.UTC)}] Order placed: {signal} {size} for {symbol}")
+            print(f"[{datetime.now(timezone.utc)}] Order placed: {signal} {size} for {symbol}")
             self.send_telegram(f"✅ Ордер исполнен: {signal} {size} {symbol} по {actual_entry:.2f}")
 
         except Exception as e:
-            print(f"[{datetime.now(timezone.UTC)}] Order error for {symbol}: {e}")
+            print(f"[{datetime.now(timezone.utc)}] Order error for {symbol}: {e}")
             self.send_telegram(f"❌ Ошибка ордера {symbol}: {str(e)[:100]}")
 
     def manage_position(self, symbol, df):
@@ -494,7 +501,7 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
             pos['trailing_stop_activated'] = True
             self.send_telegram(f'🔒 Trailing: {symbol} to Breakeven')
 
-        print(f"[{datetime.now(timezone.UTC)}] Position checked for {symbol}, PNL %: {pnl_pct:.2f}")
+        print(f"[{datetime.now(timezone.utc)}] Position checked for {symbol}, PNL %: {pnl_pct:.2f}")
 
     def close_position(self, symbol, price, reason):
         pos = self.positions.get(symbol)
@@ -519,22 +526,22 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                 f"P&L: ${pnl:.2f}"
             )
             self.send_telegram(msg)
-            print(f"[{datetime.now(timezone.UTC)}] Position closed for {symbol}: {reason}, P&L: ${pnl:.2f}")
+            print(f"[{datetime.now(timezone.utc)}] Position closed for {symbol}: {reason}, P&L: ${pnl:.2f}")
         except Exception as e:
-            print(f"[{datetime.now(timezone.UTC)}] Close order error for {symbol}: {e}")
+            print(f"[{datetime.now(timezone.utc)}] Close order error for {symbol}: {e}")
             self.send_telegram(f"❌ Ошибка закрытия {symbol}: {str(e)[:100]}")
 
         self.positions[symbol] = None
 
     def run(self):
         while True:
-            print(f"[{datetime.now(timezone.UTC)}] Starting new cycle")
+            print(f"[{datetime.now(timezone.utc)}] Starting new cycle")
             self.get_balance()
             for symbol in self.symbols:
                 try:
                     df = self.fetch_ohlcv(symbol)
                     if df is None:
-                        print(f"[{datetime.now(timezone.UTC)}] Skipping {symbol} - no data")
+                        print(f"[{datetime.now(timezone.utc)}] Skipping {symbol} - no data")
                         continue
                     df = self.calculate_indicators(df)
 
@@ -545,8 +552,8 @@ Reply with ONLY "YES" or "NO" if this trade is high probability."""
                         if signal:
                             self.place_order(symbol, signal, params)
                 except Exception as e:
-                    print(f"[{datetime.now(timezone.UTC)}] Error for {symbol}: {e}")
-            print(f"[{datetime.now(timezone.UTC)}] Cycle finished, sleeping 30s")
+                    print(f"[{datetime.now(timezone.utc)}] Error for {symbol}: {e}")
+            print(f"[{datetime.now(timezone.utc)}] Cycle finished, sleeping 30s")
             time.sleep(30)
 
 
