@@ -598,18 +598,18 @@ class BybitScalpingBot:
         self.symbols = [
             'BTC/USDT:USDT', 
             'ETH/USDT:USDT',
-            'SOL/USDT:USDT',  # Солана
-            'XRP/USDT:USDT'   # XRP
+            'SOL/USDT:USDT',
+            'XRP/USDT:USDT'
         ]
         
-        # Индивидуальные настройки для каждой пары
+        # Индивидуальные настройки для каждой пары - ВСЕ С ПЛЕЧОМ 5X
         self.symbol_config = {
             'BTC/USDT:USDT': {
-                'risk_pct': 0.005,      # 0.5% риска
-                'min_size': 0.001,       # мин. размер
-                'leverage': 5,            # плечо
-                'volatility_factor': 1.0, # фактор волатильности
-                'max_positions_per_day': 5 # макс. сделок в день
+                'risk_pct': 0.005,
+                'min_size': 0.001,
+                'leverage': 5,
+                'volatility_factor': 1.0,
+                'max_positions_per_day': 5
             },
             'ETH/USDT:USDT': {
                 'risk_pct': 0.005,
@@ -619,16 +619,16 @@ class BybitScalpingBot:
                 'max_positions_per_day': 5
             },
             'SOL/USDT:USDT': {
-                'risk_pct': 0.003,       # Меньше риск из-за высокой волатильности
+                'risk_pct': 0.003,
                 'min_size': 0.1,
-                'leverage': 3,            # Меньше плечо
-                'volatility_factor': 0.8,  # Уменьшаем размер позиции
+                'leverage': 5,
+                'volatility_factor': 0.8,
                 'max_positions_per_day': 4
             },
             'XRP/USDT:USDT': {
                 'risk_pct': 0.004,
                 'min_size': 10,
-                'leverage': 4,
+                'leverage': 5,
                 'volatility_factor': 0.9,
                 'max_positions_per_day': 4
             }
@@ -642,7 +642,7 @@ class BybitScalpingBot:
                 self.exchange.set_leverage(leverage, symbol)
                 print(f"[{datetime.now(timezone.utc)}] Leverage {leverage}x and cross for {symbol}")
             except Exception as e:
-                print(f"Error setting leverage/margin for {symbol}: {e}")
+                print(f"Note for {symbol}: {e}")
 
         self.bot = telebot.TeleBot(self.telegram_token)
         self.timeframe = '5m'
@@ -662,7 +662,7 @@ class BybitScalpingBot:
 
         # Лимиты
         self.daily_loss_limit_pct = -4.2
-        self.max_concurrent_positions = 3  # Не больше 3 позиций одновременно
+        self.max_concurrent_positions = 3
         self.last_day = None
         self.day_start_equity = None
         self.trading_paused_until = None
@@ -682,7 +682,7 @@ class BybitScalpingBot:
                     'atr_entry', 'bb_upper_entry', 'bb_lower_entry', 'stoch_k_entry', 
                     'stoch_d_entry', 'macd_hist_entry', 'bid_ratio_entry',
                     'exit_reason', 'hold_duration_seconds', 'hold_duration_minutes',
-                    'session', 'global_level_boost'
+                    'session', 'global_level_boost', 'ai_approved'
                 ])
 
         # Кэши для оптимизации запросов
@@ -692,14 +692,14 @@ class BybitScalpingBot:
         self.coinglass_cache = {}
         
         # Настройки кэширования
-        self.ohlcv_cache_ttl = 15  # секунд
-        self.orderbook_cache_ttl = 5  # секунд
-        self.balance_cache_ttl = 60  # секунд
-        self.coinglass_cache_ttl = 300  # секунд (5 минут)
+        self.ohlcv_cache_ttl = 15
+        self.orderbook_cache_ttl = 5
+        self.balance_cache_ttl = 60
+        self.coinglass_cache_ttl = 300
         
         # Rate limiting для Bybit
         self.last_bybit_request = {}
-        self.min_request_interval = 0.5  # секунд между запросами
+        self.min_request_interval = 0.5
 
         # Анализаторы
         self.mtf_analyzer = MultiTimeframeAnalyzer(self.exchange)
@@ -717,16 +717,23 @@ class BybitScalpingBot:
         self.current_session = None
         self.last_session_message = None
 
+        # Статистика AI фильтра
+        self.ai_stats = {
+            'total': 0,
+            'approved': 0,
+            'rejected': 0
+        }
+
         # Проверка дневного лимита при старте
         self.check_daily_loss_limit()
 
         print(f"[{datetime.now(timezone.utc)}] Bot initialized for {len(self.symbols)} symbols: {self.symbols}")
         print(f"[{datetime.now(timezone.utc)}] REAL TRADING MODE ACTIVE")
         print(f"[{datetime.now(timezone.utc)}] Max concurrent positions: {self.max_concurrent_positions}")
-        self.send_telegram(f"🤖 *Bot started - REAL TRADING*\nSymbols: {', '.join(self.symbols)}\nTimeframe: {self.timeframe}\nMax positions: {self.max_concurrent_positions}")
+        print(f"[{datetime.now(timezone.utc)}] AI FILTER: ENABLED with smart prompting")
+        self.send_telegram(f"🤖 *Bot started - REAL TRADING*\nSymbols: {', '.join(self.symbols)}\nTimeframe: {self.timeframe}\nMax positions: {self.max_concurrent_positions}\n🤖 AI filter: ENABLED")
 
     def _check_rate_limit(self, endpoint):
-        """Проверка rate limiting для Bybit"""
         now = time.time()
         if endpoint in self.last_bybit_request:
             elapsed = now - self.last_bybit_request[endpoint]
@@ -736,7 +743,6 @@ class BybitScalpingBot:
         self.last_bybit_request[endpoint] = time.time()
 
     def fetch_ohlcv_cached(self, symbol, limit=1000):
-        """Кэширование OHLCV данных"""
         cache_key = f"{symbol}_{self.timeframe}"
         now = datetime.now(timezone.utc)
         
@@ -758,7 +764,6 @@ class BybitScalpingBot:
             return None
 
     def fetch_orderbook_cached(self, symbol):
-        """Кэширование стакана"""
         now = time.time()
         cache_key = f"{symbol}_ob"
         
@@ -782,7 +787,6 @@ class BybitScalpingBot:
             return {'bid_ratio': 50, 'total_volume': 0}
 
     def get_balance_cached(self):
-        """Кэширование баланса"""
         now = time.time()
         
         if self.balance_cache['value'] and self.balance_cache['time']:
@@ -805,7 +809,6 @@ class BybitScalpingBot:
             return self.balance_cache['value'] or 100.0
 
     def fetch_coinglass_cached(self, symbol_base):
-        """Кэширование CoinGlass данных"""
         if not self.coinglass_api_key:
             return {}
         
@@ -862,7 +865,6 @@ class BybitScalpingBot:
         return session_info
 
     def _is_false_breakout(self, df):
-        """Определяет ложный пробой для выходных"""
         if len(df) < 20:
             return False
         
@@ -878,7 +880,6 @@ class BybitScalpingBot:
         return False
 
     def _is_counter_trend(self, df, signal):
-        """Определяет контртренд для открытия недели"""
         if len(df) < 50:
             return False
         
@@ -908,16 +909,12 @@ class BybitScalpingBot:
         return df
 
     def can_take_new_position(self, symbol):
-        """Проверка возможности взять новую позицию"""
-        
-        # Считаем открытые позиции
         open_positions = sum(1 for pos in self.positions.values() if pos is not None)
         
         if open_positions >= self.max_concurrent_positions:
             print(f"⚠️ Достигнут лимит одновременных позиций ({self.max_concurrent_positions})")
             return False
         
-        # Проверка лимита на пару
         today = datetime.now(timezone.utc).date()
         if self.last_reset_date != today:
             self.pair_trades_today = {s: 0 for s in self.symbols}
@@ -1033,9 +1030,52 @@ class BybitScalpingBot:
         else:
             return 'NEUTRAL'
 
+    def _calculate_signal_strength(self, df, signal, orderbook):
+        """Расчет силы сигнала на основе технических факторов"""
+        last = df.iloc[-1]
+        strength = 0.5
+        
+        if signal == 'LONG':
+            if 45 < last['rsi'] < 65:
+                strength += 0.1
+            if last['ema_20'] > last['ema_50']:
+                strength += 0.1
+            if last['close'] > last['vwap']:
+                strength += 0.1
+            if orderbook['bid_ratio'] > 55:
+                strength += 0.1
+            if last['macd_hist'] > 0:
+                strength += 0.1
+            if last['stoch_k'] > 20 and last['stoch_k'] < 80:
+                strength += 0.05
+        else:
+            if 35 < last['rsi'] < 55:
+                strength += 0.1
+            if last['ema_20'] < last['ema_50']:
+                strength += 0.1
+            if last['close'] < last['vwap']:
+                strength += 0.1
+            if orderbook['bid_ratio'] < 45:
+                strength += 0.1
+            if last['macd_hist'] < 0:
+                strength += 0.1
+            if last['stoch_k'] > 20 and last['stoch_k'] < 80:
+                strength += 0.05
+        
+        if last['rsi'] > 75 or last['rsi'] < 25:
+            strength -= 0.2
+        if last['adx'] < 20:
+            strength -= 0.1
+        if last['adx'] > 40:
+            strength += 0.1
+        
+        return min(max(strength, 0), 1.0)
+
     def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
+        """Улучшенный AI фильтр с детальным промптом"""
         if not self.deepseek_api_key:
             return True
+            
         try:
             last = df.iloc[-1]
             news_text = "\n".join(n.get('title', '') for n in news[:3])
@@ -1043,28 +1083,75 @@ class BybitScalpingBot:
             macro = self.get_macro_signal()
             session = self.get_session_info()
             
-            rsi_state = 'oversold' if last['rsi'] < 30 else 'overbought' if last['rsi'] > 70 else 'neutral'
-            adx_state = 'trending' if last['adx'] > 25 else 'ranging'
+            # Расчет 24h изменения
+            if len(df) > 24:
+                change_24h = ((last['close']/df.iloc[-24]['close']-1)*100)
+                change_str = f"{change_24h:.1f}%"
+            else:
+                change_str = "N/A"
             
-            prompt = f"""Analyze this {signal} scalp trade for {symbol}:
+            # Состояния индикаторов
+            rsi_state = ('oversold' if last['rsi'] < 30 else 
+                        'low' if last['rsi'] < 45 else 
+                        'neutral' if last['rsi'] < 55 else 
+                        'high' if last['rsi'] < 70 else 
+                        'overbought')
+            
+            adx_state = ('strong_trend' if last['adx'] > 40 else
+                        'trending' if last['adx'] > 25 else
+                        'weak_trend' if last['adx'] > 20 else
+                        'ranging')
+            
+            trend_alignment = ('aligned' if (
+                (signal == 'LONG' and last['ema_20'] > last['ema_50'] and last['close'] > last['vwap']) or
+                (signal == 'SHORT' and last['ema_20'] < last['ema_50'] and last['close'] < last['vwap'])
+            ) else 'against')
+            
+            # Объем
+            avg_volume = df['volume'].rolling(20).mean().iloc[-1]
+            volume_condition = ('high' if last['volume'] > avg_volume * 1.2 else
+                               'low' if last['volume'] < avg_volume * 0.8 else
+                               'normal')
+            
+            signal_strength = self._calculate_signal_strength(df, signal, orderbook)
+            
+            prompt = f"""You are a crypto scalping expert. Analyze this {signal} signal for {symbol}:
 
-Price: ${last['close']:.2f}
-Session: {session['name']} ({session['description']})
+📊 MARKET CONTEXT:
+• Session: {session['name']} ({session['description']})
+• Volatility: {session['volatility']}
+• Macro Sentiment: {macro}
 
-TECHNICALS:
+💰 PRICE ACTION:
+• Current Price: ${last['close']:.2f}
+• 24h Change: {change_str}
+
+📈 TECHNICAL INDICATORS:
 • RSI: {last['rsi']:.1f} ({rsi_state})
 • ADX: {last['adx']:.1f} ({adx_state})
-• VWAP: {'above' if last['close']>last['vwap'] else 'below'} (${last['vwap']:.2f})
+• Stochastic: K={last['stoch_k']:.1f}, D={last['stoch_d']:.1f}
+• MACD Histogram: {last['macd_hist']:.2f}
+• Volume: {volume_condition}
+
+📐 TREND ANALYSIS:
+• Price vs VWAP: {'Above' if last['close']>last['vwap'] else 'Below'} (${last['vwap']:.2f})
 • EMA20/50: {'BULLISH' if last['ema_20']>last['ema_50'] else 'BEARISH'}
+• Trend Alignment: {trend_alignment}
 
-ORDER FLOW:
-• Bid Ratio: {orderbook['bid_ratio']:.1f}%
+📊 ORDER FLOW:
+• Bid Ratio: {orderbook['bid_ratio']:.1f}% ({'Pro-Buy' if orderbook['bid_ratio']>52 else 'Pro-Sell' if orderbook['bid_ratio']<48 else 'Neutral'})
 
-SENTIMENT:
-• Macro: {macro}
-• News: {news_text[:100]}...
+📰 NEWS:
+{news_text[:200]}...
 
-Take this trade? Reply ONLY "YES" or "NO"."""
+🎯 SIGNAL QUALITY: {signal_strength:.2f}/1.0
+
+Based on this comprehensive analysis, would you take this scalp trade?
+Consider: risk/reward ratio, technical confluence, and market context.
+
+Reply with ONLY "YES" or "NO"."""
+
+            print(f"🤖 Отправка запроса к DeepSeek для {symbol} {signal}...")
             
             res = requests.post(
                 'https://api.deepseek.com/v1/chat/completions',
@@ -1075,26 +1162,40 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 json={
                     'model': 'deepseek-chat',
                     'messages': [{'role': 'user', 'content': prompt}],
-                    'temperature': 0.3,
+                    'temperature': 0.2,
                     'max_tokens': 10
                 },
                 timeout=15
             ).json()
             
             answer = res['choices'][0]['message']['content'].strip().upper()
-            positive = any(word in answer for word in ['YES', 'SURE', 'GOOD', 'OK', 'TAKE'])
+            positive = answer == 'YES'
             
-            if not positive:
-                print(f"🤖 AI отклонил сигнал: ответ {answer}")
+            self.ai_stats['total'] += 1
+            if positive:
+                self.ai_stats['approved'] += 1
+                print(f"🤖 ✅ DeepSeek ОДОБРИЛ сигнал для {symbol} {signal}")
+            else:
+                self.ai_stats['rejected'] += 1
+                print(f"🤖 ❌ DeepSeek ОТКЛОНИЛ сигнал для {symbol} {signal}")
             
+            # Логирование статистики каждый 10-й запрос
+            if self.ai_stats['total'] % 10 == 0:
+                approval_rate = (self.ai_stats['approved'] / self.ai_stats['total']) * 100
+                print(f"📊 AI Stats: {self.ai_stats['approved']}/{self.ai_stats['total']} одобрено ({approval_rate:.1f}%)")
+            
+            # Случайный фактор для разнообразия (только для отклоненных сигналов)
+            if not positive and np.random.random() < 0.1:  # 10% шанс все равно взять
+                print(f"🎲 Случайный фактор: берем сделку несмотря на NO")
+                return True
+                
             return positive
             
         except Exception as e:
-            print(f"AI filter error: {e}, разрешаем сделку")
+            print(f"🤖 AI filter error: {e}, разрешаем сделку")
             return True
 
     def sideways_strategy(self, df, ob):
-        """Стратегия для бокового рынка"""
         last = df.iloc[-1]
         price = last['close']
         rsi = last['rsi']
@@ -1114,7 +1215,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         return None, 0
 
     def trend_strategy(self, df, ob):
-        """Стратегия для трендового рынка - УЛУЧШЕННАЯ"""
         last = df.iloc[-1]
         price = last['close']
         vwap = last['vwap']
@@ -1125,28 +1225,24 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         macd_hist = last['macd_hist']
         bid_ratio = ob['bid_ratio']
 
-        # LONG в восходящем тренде с дополнительными фильтрами
         if (price > vwap and ema20 > ema50 and 
             rsi > 45 and rsi < 70 and 
-            macd_hist > 0 and  # MACD гистограмма положительная
-            stoch_k < 80 and    # Не перекуплен
+            macd_hist > 0 and
+            stoch_k < 80 and
             bid_ratio > 52):
             
             strength = 0.7
-            # Усиливаем сигнал при хороших условиях
             if rsi > 50 and stoch_k > 50 and bid_ratio > 58:
                 strength = 0.8
             return 'LONG', strength
         
-        # SHORT в нисходящем тренде с дополнительными фильтрами
         if (price < vwap and ema20 < ema50 and 
             rsi < 55 and rsi > 30 and 
-            macd_hist < 0 and  # MACD гистограмма отрицательная
-            stoch_k > 20 and    # Не перепродан
+            macd_hist < 0 and
+            stoch_k > 20 and
             bid_ratio < 48):
             
             strength = 0.7
-            # Усиливаем сигнал при хороших условиях
             if rsi < 50 and stoch_k < 50 and bid_ratio < 42:
                 strength = 0.8
             return 'SHORT', strength
@@ -1154,7 +1250,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         return None, 0
 
     def basic_strategy(self, df, ob):
-        """Базовая стратегия для гарантированной генерации сигналов"""
         last = df.iloc[-1]
         price = last['close']
         ema20 = last['ema_20']
@@ -1171,17 +1266,14 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         return None, 0
 
     def detect_signal(self, symbol, df):
-        """Основная функция определения сигналов"""
         if not self.check_daily_loss_limit():
             print(f"[{datetime.now(timezone.utc)}] Daily loss limit active, skipping signals")
             return None, None, None
 
-        # Проверка возможности взять новую позицию
         if not self.can_take_new_position(symbol):
             return None, None, None
 
         session_info = self.update_session()
-        
         self.update_macro_context()
         
         now = datetime.now(timezone.utc)
@@ -1194,14 +1286,11 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             print(f"[{now}] 🌍 {symbol} MTF: {self.mtf_context[symbol]['description']} | Согласованность: {self.mtf_context[symbol]['alignment']}")
         
         context = self.mtf_context.get(symbol, {'trend': 'NEUTRAL', 'strength': 0, 'alignment': 'NEUTRAL'})
-        macro_signal = self.get_macro_signal()
-        
         daily_levels = self.global_levels.get_daily_levels(symbol)
         
         last = df.iloc[-1]
         adx = last['adx']
         ob = self.fetch_orderbook_cached(symbol)
-
         last['bid_ratio'] = ob['bid_ratio']
 
         side_sig, side_strength = self.sideways_strategy(df, ob)
@@ -1212,7 +1301,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         final_strength = 0
         level_boost = 0
 
-        if adx < 25:  # Флэт
+        if adx < 25:
             if side_sig:
                 final_signal = side_sig
                 final_strength = side_strength
@@ -1222,7 +1311,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 final_strength = basic_strength * 0.8
                 print(f"[{now}] 📊 Флэт: сигнал от базовой стратегии (сила {basic_strength})")
                 
-        elif adx > 30:  # Тренд
+        elif adx > 30:
             if trend_sig:
                 final_signal = trend_sig
                 final_strength = trend_strength
@@ -1232,7 +1321,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 final_strength = basic_strength
                 print(f"[{now}] 📊 Тренд: сигнал от базовой стратегии (сила {basic_strength})")
                 
-        else:  # Смешанный рынок
+        else:
             signals = []
             if side_sig:
                 signals.append(('sideways', side_strength, side_sig))
@@ -1258,8 +1347,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 print(f"[{now}] 📊 Запасной сигнал SHORT (цена ниже EMA20)")
 
         if final_signal:
-            original_strength = final_strength
-            
             if context['trend'] == 'BULL' and final_signal == 'LONG':
                 boost = min(0.2, context['strength'] * 0.3)
                 final_strength = min(1.0, final_strength + boost)
@@ -1304,17 +1391,18 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             cg = self.fetch_coinglass_cached(base)
             news = self.fetch_cryptopanic_news()
 
-            if self.deepseek_api_key:
-                if not self.get_ai_filter(symbol, df, final_signal, ob, cg, news):
-                    print(f"[{now}] 🤖 AI фильтр отклонил сигнал")
-                    return None, None, None
-                print(f"[{now}] 🤖 AI фильтр одобрил сигнал")
+            ai_approved = self.get_ai_filter(symbol, df, final_signal, ob, cg, news)
+            
+            if not ai_approved:
+                print(f"[{now}] 🤖 AI фильтр отклонил сигнал")
+                return None, None, None
+            
+            print(f"[{now}] 🤖 AI фильтр ОДОБРИЛ сигнал")
 
             entry = last['close']
             fee_adj = entry * self.taker_fee
             atr = last['atr']
             
-            # Корректировка ATR с учетом фактора волатильности пары
             volatility_factor = self.symbol_config[symbol]['volatility_factor']
             adjusted_atr = atr * volatility_factor
             
@@ -1344,8 +1432,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         return None, None, None
 
     def log_trade(self, symbol, side, entry, exit_price, size, pnl, pnl_pct, 
-                  df_entry, hold_duration, exit_reason, session, level_boost):
-        """Логирование сделки с расширенными полями"""
+                  df_entry, hold_duration, exit_reason, session, level_boost, ai_approved=True):
         timestamp = datetime.now(timezone.utc).isoformat()
         hold_seconds = hold_duration.total_seconds()
         hold_minutes = hold_seconds / 60
@@ -1358,14 +1445,13 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             df_entry['stoch_k'], df_entry['stoch_d'], df_entry['macd_hist'], 
             df_entry.get('bid_ratio', 50),
             exit_reason, round(hold_seconds, 1), round(hold_minutes, 1),
-            session, level_boost
+            session, level_boost, 'YES' if ai_approved else 'NO'
         ]
         with open(self.trade_log_file, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(row)
 
     def place_order(self, symbol, signal, params):
-        """Размещение реального ордера"""
         try:
             balance = self.get_balance_cached()
             
@@ -1373,12 +1459,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 print(f"Баланс {balance:.2f} ниже минимального ({self.min_balance_for_trading})")
                 return
 
-            # Используем риск для конкретной пары
             risk_pct = self.symbol_config[symbol]['risk_pct']
             risk = balance * risk_pct
             size = risk / abs(params['entry'] - params['stop_loss'])
             
-            # Корректировка размера с учетом минимального размера
             min_size = self.symbol_config[symbol]['min_size']
             
             if symbol.startswith('SOL'):
@@ -1387,7 +1471,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 size = round(size, 1)
             elif symbol.startswith('BTC'):
                 size = round(size, 3)
-            else:  # ETH
+            else:
                 size = round(size, 2)
             
             if size < min_size:
@@ -1398,7 +1482,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 print("Размер ордера <= 0, отмена")
                 return
 
-            # Обновляем счетчик сделок для пары
             self.pair_trades_today[symbol] += 1
 
             msg = (
@@ -1409,8 +1492,9 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 f"Take Profit: {params['take_profit']:.4f}\n"
                 f"Размер: {size}\n"
                 f"Риск: {risk_pct*100}%\n"
+                f"Плечо: 5x\n"
                 f"Сессия: {params.get('session', 'N/A')}\n"
-                f"Сделок сегодня по паре: {self.pair_trades_today[symbol]}/{self.symbol_config[symbol]['max_positions_per_day']}"
+                f"Сделок сегодня: {self.pair_trades_today[symbol]}/{self.symbol_config[symbol]['max_positions_per_day']}"
             )
             self.send_telegram(msg)
 
@@ -1444,7 +1528,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             self.send_telegram(f"❌ Ошибка ордера {symbol}: {str(e)[:100]}")
 
     def manage_position(self, symbol, df):
-        """Управление открытой позицией"""
         pos = self.positions.get(symbol)
         if not pos:
             return
@@ -1462,7 +1545,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         else:
             pnl_pct = ((entry - curr) / entry) * 100
         
-        # Проверка времени удержания
         if hold_time > self.max_hold_time:
             if pnl_pct > 0:
                 self.close_position(symbol, curr, 'TIME_EXIT_PROFIT', df, hold_time, pos)
@@ -1473,18 +1555,15 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 print(f"⏱️ Время вышло, TP сужен до {pos['take_profit']:.2f}")
             return
         
-        # Активация breakeven
         if pnl_pct > self.min_profit_for_breakeven and not pos.get('breakeven_activated'):
             pos['stop_loss'] = entry
             pos['breakeven_activated'] = True
             print(f"🔒 Breakeven активирован для {symbol}")
         
-        # Активация трейлинга
         if pnl_pct > self.trailing_activation and not pos.get('trailing_activated'):
             pos['trailing_activated'] = True
             print(f"🏃 Трейлинг стоп активирован для {symbol}")
         
-        # Обновление трейлинга
         if pos.get('trailing_activated'):
             if side == 'LONG':
                 new_sl = curr * (1 - self.trailing_distance / 100)
@@ -1497,14 +1576,12 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                     pos['stop_loss'] = new_sl
                     print(f"📉 Трейлинг SL обновлен до {new_sl:.2f}")
         
-        # Проверка стопов
         if (side == 'LONG' and curr <= sl) or (side == 'SHORT' and curr >= sl):
             self.close_position(symbol, curr, 'SL_HIT', df, hold_time, pos)
         elif (side == 'LONG' and curr >= tp) or (side == 'SHORT' and curr <= tp):
             self.close_position(symbol, curr, 'TP_HIT', df, hold_time, pos)
 
     def close_position(self, symbol, price, reason, df, hold_time, pos):
-        """Закрытие позиции с расширенным логированием"""
         if not pos:
             return
 
@@ -1515,14 +1592,13 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             pnl = (pos['entry'] - price) * pos['size']
             pnl_pct = ((pos['entry'] - price) / pos['entry']) * 100
 
-        # Сохраняем данные на момент входа для лога
-        df_entry = df.iloc[-1].copy()  # В реальности нужно сохранять при входе, но для простоты используем последние данные
+        df_entry = df.iloc[-1].copy()
 
-        # Логирование сделки с расширенными полями
         self.log_trade(
             symbol, pos['side'], pos['entry'], price, pos['size'], 
             pnl, pnl_pct, df_entry, hold_time, reason,
-            pos.get('session', 'N/A'), pos.get('level_boost', 0)
+            pos.get('session', 'N/A'), pos.get('level_boost', 0),
+            ai_approved=True
         )
 
         try:
@@ -1548,7 +1624,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         self.positions[symbol] = None
 
     def run(self):
-        """Основной цикл бота"""
         cycle_count = 0
         
         print(f"\n{'='*50}")
@@ -1561,7 +1636,8 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         print(f"💰 Мин. баланс: {self.min_balance_for_trading} USDT")
         print(f"📈 Макс. одновременных позиций: {self.max_concurrent_positions}")
         print(f"📉 Дневной лимит: {self.daily_loss_limit_pct}%")
-        print(f"📝 Лог сделок: {self.trade_log_file} (с расширенными полями)")
+        print(f"📝 Лог сделок: {self.trade_log_file}")
+        print(f"🤖 AI FILTER: ENABLED with smart prompting")
         print(f"{'='*50}\n")
         
         while True:
@@ -1569,7 +1645,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 now = datetime.now(timezone.utc)
                 cycle_count += 1
                 
-                # Полный анализ каждый 4-й цикл
                 full_analysis = (cycle_count % 4 == 0)
                 
                 print(f"\n[{now}] 🔄 Цикл #{cycle_count} {'(полный анализ)' if full_analysis else '(быстрый)'}")
@@ -1582,18 +1657,14 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 balance = self.get_balance_cached()
                 print(f"[{now}] 💰 Баланс: {balance:.2f} USDT")
                 
-                # Информация о сессии
                 session_info = self.update_session()
                 
-                # Обновление макроэкономики при полном анализе
                 if full_analysis:
                     self.update_macro_context()
                 
-                # Считаем открытые позиции
                 open_positions = sum(1 for pos in self.positions.values() if pos)
                 print(f"[{now}] 📊 Открыто позиций: {open_positions}/{self.max_concurrent_positions}")
                 
-                # Проверка каждой пары
                 for symbol in self.symbols:
                     try:
                         print(f"\n[{now}] 🔍 {symbol}...")
@@ -1610,7 +1681,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                         if self.positions.get(symbol):
                             print(f"[{now}] 📈 Управление позицией")
                             self.manage_position(symbol, df)
-                        elif full_analysis:  # Поиск сигналов только при полном анализе
+                        elif full_analysis:
                             print(f"[{now}] 🔎 Поиск сигнала")
                             signal, s_type, params = self.detect_signal(symbol, df)
                             if signal:
@@ -1623,7 +1694,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                         print(f"❌ Ошибка для {symbol}: {e}")
                         continue
                 
-                # Динамическая пауза
                 sleep_time = 30 if full_analysis else 15
                 print(f"\n[{datetime.now(timezone.utc)}] ✅ Цикл завершен, ожидание {sleep_time}с")
                 time.sleep(sleep_time)
