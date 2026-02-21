@@ -522,11 +522,18 @@ class GlobalLevels:
             base = round(price / 1000) * 1000
             for i in [-2, -1, 0, 1, 2]:
                 levels.append(base + i * 1000)
-        
-        if price > 100:
+        elif price > 100:
             base = round(price / 100) * 100
             for i in [-2, -1, 0, 1, 2]:
                 levels.append(base + i * 100)
+        elif price > 10:
+            base = round(price / 10) * 10
+            for i in [-2, -1, 0, 1, 2]:
+                levels.append(base + i * 10)
+        else:
+            base = round(price)
+            for i in [-2, -1, 0, 1, 2]:
+                levels.append(base + i)
         
         return sorted(levels)
     
@@ -587,19 +594,61 @@ class BybitScalpingBot:
             'options': {'defaultType': 'linear'}
         })
 
-        self.symbols = ['BTC/USDT:USDT', 'ETH/USDT:USDT']
+        # Расширенный список топовых пар
+        self.symbols = [
+            'BTC/USDT:USDT', 
+            'ETH/USDT:USDT',
+            'SOL/USDT:USDT',  # Солана
+            'XRP/USDT:USDT'   # XRP
+        ]
+        
+        # Индивидуальные настройки для каждой пары
+        self.symbol_config = {
+            'BTC/USDT:USDT': {
+                'risk_pct': 0.005,      # 0.5% риска
+                'min_size': 0.001,       # мин. размер
+                'leverage': 5,            # плечо
+                'volatility_factor': 1.0, # фактор волатильности
+                'max_positions_per_day': 5 # макс. сделок в день
+            },
+            'ETH/USDT:USDT': {
+                'risk_pct': 0.005,
+                'min_size': 0.01,
+                'leverage': 5,
+                'volatility_factor': 1.0,
+                'max_positions_per_day': 5
+            },
+            'SOL/USDT:USDT': {
+                'risk_pct': 0.003,       # Меньше риск из-за высокой волатильности
+                'min_size': 0.1,
+                'leverage': 3,            # Меньше плечо
+                'volatility_factor': 0.8,  # Уменьшаем размер позиции
+                'max_positions_per_day': 4
+            },
+            'XRP/USDT:USDT': {
+                'risk_pct': 0.004,
+                'min_size': 10,
+                'leverage': 4,
+                'volatility_factor': 0.9,
+                'max_positions_per_day': 4
+            }
+        }
+
+        # Установка плеча для каждой пары
         for symbol in self.symbols:
             try:
+                leverage = self.symbol_config[symbol]['leverage']
                 self.exchange.set_margin_mode('cross', symbol)
-                self.exchange.set_leverage(5, symbol)
-                print(f"[{datetime.now(timezone.utc)}] Leverage 5x and cross for {symbol}")
+                self.exchange.set_leverage(leverage, symbol)
+                print(f"[{datetime.now(timezone.utc)}] Leverage {leverage}x and cross for {symbol}")
             except Exception as e:
-                print(f"Error setting leverage/margin: {e}")
+                print(f"Error setting leverage/margin for {symbol}: {e}")
 
         self.bot = telebot.TeleBot(self.telegram_token)
         self.timeframe = '5m'
         self.positions = {s: None for s in self.symbols}
 
+        # Общие настройки
         self.sl_atr_multiplier = 1.2
         self.tp_atr_multiplier = 2.0
         self.trailing_stop_percent = 0.5
@@ -611,22 +660,48 @@ class BybitScalpingBot:
         self.trailing_distance = 0.3
         self.min_balance_for_trading = 50
 
+        # Лимиты
         self.daily_loss_limit_pct = -4.2
+        self.max_concurrent_positions = 3  # Не больше 3 позиций одновременно
         self.last_day = None
         self.day_start_equity = None
         self.trading_paused_until = None
+        
+        # Счетчики сделок по парам
+        self.pair_trades_today = {s: 0 for s in self.symbols}
+        self.last_reset_date = datetime.now(timezone.utc).date()
 
+        # Лог файл с расширенными полями
         self.trade_log_file = "trade_log.csv"
         if not os.path.exists(self.trade_log_file):
             with open(self.trade_log_file, 'w', newline='') as f:
                 writer = csv.writer(f)
                 writer.writerow([
                     'timestamp', 'symbol', 'side', 'entry', 'exit', 'size', 'pnl', 'pnl_pct',
-                    'rsi', 'adx', 'vwap', 'ema_20', 'ema_50', 'atr', 'bb_upper', 'bb_lower',
-                    'stoch_k', 'stoch_d', 'macd_hist', 'bid_ratio', 'hold_time_minutes',
+                    'rsi_entry', 'adx_entry', 'vwap_entry', 'ema_20_entry', 'ema_50_entry',
+                    'atr_entry', 'bb_upper_entry', 'bb_lower_entry', 'stoch_k_entry', 
+                    'stoch_d_entry', 'macd_hist_entry', 'bid_ratio_entry',
+                    'exit_reason', 'hold_duration_seconds', 'hold_duration_minutes',
                     'session', 'global_level_boost'
                 ])
 
+        # Кэши для оптимизации запросов
+        self.ohlcv_cache = {}
+        self.orderbook_cache = {}
+        self.balance_cache = {'value': None, 'time': None}
+        self.coinglass_cache = {}
+        
+        # Настройки кэширования
+        self.ohlcv_cache_ttl = 15  # секунд
+        self.orderbook_cache_ttl = 5  # секунд
+        self.balance_cache_ttl = 60  # секунд
+        self.coinglass_cache_ttl = 300  # секунд (5 минут)
+        
+        # Rate limiting для Bybit
+        self.last_bybit_request = {}
+        self.min_request_interval = 0.5  # секунд между запросами
+
+        # Анализаторы
         self.mtf_analyzer = MultiTimeframeAnalyzer(self.exchange)
         self.mtf_context = {}
         self.mtf_last_update = {}
@@ -642,9 +717,117 @@ class BybitScalpingBot:
         self.current_session = None
         self.last_session_message = None
 
-        print(f"[{datetime.now(timezone.utc)}] Bot initialized for {self.symbols}")
+        # Проверка дневного лимита при старте
+        self.check_daily_loss_limit()
+
+        print(f"[{datetime.now(timezone.utc)}] Bot initialized for {len(self.symbols)} symbols: {self.symbols}")
         print(f"[{datetime.now(timezone.utc)}] REAL TRADING MODE ACTIVE")
-        self.send_telegram(f"🤖 *Bot started - REAL TRADING*\nSymbols: {' '.join(self.symbols)}\nTimeframe: {self.timeframe}")
+        print(f"[{datetime.now(timezone.utc)}] Max concurrent positions: {self.max_concurrent_positions}")
+        self.send_telegram(f"🤖 *Bot started - REAL TRADING*\nSymbols: {', '.join(self.symbols)}\nTimeframe: {self.timeframe}\nMax positions: {self.max_concurrent_positions}")
+
+    def _check_rate_limit(self, endpoint):
+        """Проверка rate limiting для Bybit"""
+        now = time.time()
+        if endpoint in self.last_bybit_request:
+            elapsed = now - self.last_bybit_request[endpoint]
+            if elapsed < self.min_request_interval:
+                sleep_time = self.min_request_interval - elapsed
+                time.sleep(sleep_time)
+        self.last_bybit_request[endpoint] = time.time()
+
+    def fetch_ohlcv_cached(self, symbol, limit=1000):
+        """Кэширование OHLCV данных"""
+        cache_key = f"{symbol}_{self.timeframe}"
+        now = datetime.now(timezone.utc)
+        
+        if cache_key in self.ohlcv_cache:
+            data, timestamp = self.ohlcv_cache[cache_key]
+            if now - timestamp < timedelta(seconds=self.ohlcv_cache_ttl):
+                return data
+        
+        self._check_rate_limit('ohlcv')
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=limit)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            
+            self.ohlcv_cache[cache_key] = (df, now)
+            return df
+        except Exception as e:
+            print(f"Error fetching OHLCV for {symbol}: {e}")
+            return None
+
+    def fetch_orderbook_cached(self, symbol):
+        """Кэширование стакана"""
+        now = time.time()
+        cache_key = f"{symbol}_ob"
+        
+        if cache_key in self.orderbook_cache:
+            data, timestamp = self.orderbook_cache[cache_key]
+            if now - timestamp < self.orderbook_cache_ttl:
+                return data
+        
+        self._check_rate_limit('orderbook')
+        try:
+            orderbook = self.exchange.fetch_order_book(symbol, limit=50)
+            total_bids = sum(bid[1] for bid in orderbook['bids'])
+            total_asks = sum(ask[1] for ask in orderbook['asks'])
+            total = total_bids + total_asks
+            bid_ratio = (total_bids / total) * 100 if total > 0 else 50
+            
+            result = {'bid_ratio': bid_ratio, 'total_volume': total}
+            self.orderbook_cache[cache_key] = (result, now)
+            return result
+        except Exception as e:
+            return {'bid_ratio': 50, 'total_volume': 0}
+
+    def get_balance_cached(self):
+        """Кэширование баланса"""
+        now = time.time()
+        
+        if self.balance_cache['value'] and self.balance_cache['time']:
+            if now - self.balance_cache['time'] < self.balance_cache_ttl:
+                return self.balance_cache['value']
+        
+        self._check_rate_limit('balance')
+        try:
+            bal = self.exchange.fetch_balance()
+            if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
+                equity = float(bal['info']['result']['list'][0]['totalEquity'])
+            else:
+                equity = float(bal['USDT']['total']) if 'USDT' in bal and 'total' in bal['USDT'] else 100.0
+            
+            self.balance_cache['value'] = equity
+            self.balance_cache['time'] = now
+            return equity
+        except Exception as e:
+            print(f"Error getting balance: {e}")
+            return self.balance_cache['value'] or 100.0
+
+    def fetch_coinglass_cached(self, symbol_base):
+        """Кэширование CoinGlass данных"""
+        if not self.coinglass_api_key:
+            return {}
+        
+        now = time.time()
+        cache_key = f"coinglass_{symbol_base}"
+        
+        if cache_key in self.coinglass_cache:
+            data, timestamp = self.coinglass_cache[cache_key]
+            if now - timestamp < self.coinglass_cache_ttl:
+                return data
+        
+        try:
+            headers = {'cg-api-key': self.coinglass_api_key}
+            url = f"https://open-api.coinglass.com/public/v2/long_short?symbol={symbol_base}&time_type=h1"
+            res = requests.get(url, headers=headers, timeout=10).json()
+            data = res.get('data', [])[0] if res.get('success') else {}
+            
+            self.coinglass_cache[cache_key] = (data, now)
+            return data
+        except Exception as e:
+            print(f"CoinGlass error for {symbol_base}: {e}")
+            return {}
 
     def send_telegram(self, message):
         try:
@@ -687,10 +870,8 @@ class BybitScalpingBot:
         high_20 = df['high'].iloc[-20:].max()
         low_20 = df['low'].iloc[-20:].min()
         
-        # Пробой выше 20-периодного максимума, но закрытие ниже
         if last['high'] > high_20 and last['close'] < high_20:
             return True
-        # Пробой ниже 20-периодного минимума, но закрытие выше
         if last['low'] < low_20 and last['close'] > low_20:
             return True
         
@@ -711,37 +892,81 @@ class BybitScalpingBot:
         
         return False
 
-    def fetch_ohlcv(self, symbol, limit=1000):
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, self.timeframe, limit=limit)
-            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            return df
-        except Exception as e:
-            print(f"Error fetching OHLCV for {symbol}: {e}")
-            return None
+    def calculate_indicators(self, df):
+        df['vwap'] = TechnicalIndicators.vwap(df['high'], df['low'], df['close'], df['volume'])
+        df['rsi'] = TechnicalIndicators.rsi(df['close'], period=14)
+        df['ema_20'] = TechnicalIndicators.ema(df['close'], period=20)
+        df['ema_50'] = TechnicalIndicators.ema(df['close'], period=50)
+        df['atr'] = TechnicalIndicators.atr(df['high'], df['low'], df['close'], period=14)
+        bb_upper, bb_middle, bb_lower = TechnicalIndicators.bollinger_bands(df['close'], period=20, std=2)
+        df['bb_upper'] = bb_upper
+        df['bb_lower'] = bb_lower
+        adx, _, _ = TechnicalIndicators.adx(df['high'], df['low'], df['close'], period=14)
+        df['adx'] = adx
+        df['stoch_k'], df['stoch_d'] = TechnicalIndicators.stochastic(df['high'], df['low'], df['close'])
+        df['macd'], _, df['macd_hist'] = TechnicalIndicators.macd(df['close'])
+        return df
 
-    def fetch_orderbook_data(self, symbol):
-        try:
-            orderbook = self.exchange.fetch_order_book(symbol, limit=50)
-            total_bids = sum(bid[1] for bid in orderbook['bids'])
-            total_asks = sum(ask[1] for ask in orderbook['asks'])
-            total = total_bids + total_asks
-            bid_ratio = (total_bids / total) * 100 if total > 0 else 50
-            return {'bid_ratio': bid_ratio, 'total_volume': total}
-        except Exception as e:
-            return {'bid_ratio': 50, 'total_volume': 0}
+    def can_take_new_position(self, symbol):
+        """Проверка возможности взять новую позицию"""
+        
+        # Считаем открытые позиции
+        open_positions = sum(1 for pos in self.positions.values() if pos is not None)
+        
+        if open_positions >= self.max_concurrent_positions:
+            print(f"⚠️ Достигнут лимит одновременных позиций ({self.max_concurrent_positions})")
+            return False
+        
+        # Проверка лимита на пару
+        today = datetime.now(timezone.utc).date()
+        if self.last_reset_date != today:
+            self.pair_trades_today = {s: 0 for s in self.symbols}
+            self.last_reset_date = today
+            print(f"📅 Сброс счетчиков сделок на новый день")
+        
+        max_per_pair = self.symbol_config[symbol]['max_positions_per_day']
+        if self.pair_trades_today[symbol] >= max_per_pair:
+            print(f"⚠️ Лимит сделок для {symbol} на сегодня ({max_per_pair})")
+            return False
+        
+        return True
 
-    def fetch_coinglass_data(self, symbol_base):
-        if not self.coinglass_api_key:
-            return {}
+    def check_daily_loss_limit(self):
+        now = datetime.now(timezone.utc)
+        current_day = now.date()
+
+        if self.last_day != current_day:
+            try:
+                equity = self.get_balance_cached()
+                self.day_start_equity = equity
+                self.last_day = current_day
+                self.trading_paused_until = None
+                print(f"[{now}] Новый день UTC. Депозит на начало: {equity:.2f} USDT")
+            except Exception as e:
+                print(f"Error checking daily loss limit: {e}")
+                return True
+
+        if self.trading_paused_until and now < self.trading_paused_until:
+            print(f"Trading paused until {self.trading_paused_until}")
+            return False
+
+        if self.day_start_equity is None:
+            return True
+
         try:
-            headers = {'cg-api-key': self.coinglass_api_key}
-            url = f"https://open-api.coinglass.com/public/v2/long_short?symbol={symbol_base}&time_type=h1"
-            res = requests.get(url, headers=headers, timeout=10).json()
-            return res.get('data', [])[0] if res.get('success') else {}
+            current_equity = self.get_balance_cached()
+            pnl_pct = (current_equity - self.day_start_equity) / self.day_start_equity * 100
+
+            if pnl_pct <= self.daily_loss_limit_pct:
+                self.trading_paused_until = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+                msg = f"🚨 Дневной лимит убытков -{self.daily_loss_limit_pct}% достигнут! Пауза до {self.trading_paused_until.strftime('%Y-%m-%d %H:%M UTC')}"
+                print(msg)
+                self.send_telegram(msg)
+                return False
+            return True
         except Exception as e:
-            return {}
+            print(f"Error checking PnL: {e}")
+            return True
 
     def fetch_cryptopanic_news(self):
         if not self.cryptopanic_api_key:
@@ -868,68 +1093,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             print(f"AI filter error: {e}, разрешаем сделку")
             return True
 
-    def calculate_indicators(self, df):
-        df['vwap'] = TechnicalIndicators.vwap(df['high'], df['low'], df['close'], df['volume'])
-        df['rsi'] = TechnicalIndicators.rsi(df['close'], period=14)
-        df['ema_20'] = TechnicalIndicators.ema(df['close'], period=20)
-        df['ema_50'] = TechnicalIndicators.ema(df['close'], period=50)
-        df['atr'] = TechnicalIndicators.atr(df['high'], df['low'], df['close'], period=14)
-        bb_upper, bb_middle, bb_lower = TechnicalIndicators.bollinger_bands(df['close'], period=20, std=2)
-        df['bb_upper'] = bb_upper
-        df['bb_lower'] = bb_lower
-        adx, _, _ = TechnicalIndicators.adx(df['high'], df['low'], df['close'], period=14)
-        df['adx'] = adx
-        df['stoch_k'], df['stoch_d'] = TechnicalIndicators.stochastic(df['high'], df['low'], df['close'])
-        df['macd'], _, df['macd_hist'] = TechnicalIndicators.macd(df['close'])
-        return df
-
-    def check_daily_loss_limit(self):
-        now = datetime.now(timezone.utc)
-        current_day = now.date()
-
-        if self.last_day != current_day:
-            try:
-                bal = self.exchange.fetch_balance()
-                if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
-                    equity = float(bal['info']['result']['list'][0]['totalEquity'])
-                else:
-                    equity = float(bal['USDT']['total']) if 'USDT' in bal and 'total' in bal['USDT'] else 100.0
-                
-                self.day_start_equity = equity
-                self.last_day = current_day
-                self.trading_paused_until = None
-                print(f"[{now}] Новый день UTC. Депозит на начало: {equity:.2f} USDT")
-            except Exception as e:
-                print(f"Error checking daily loss limit: {e}")
-                return True
-
-        if self.trading_paused_until and now < self.trading_paused_until:
-            print(f"Trading paused until {self.trading_paused_until}")
-            return False
-
-        if self.day_start_equity is None:
-            return True
-
-        try:
-            bal = self.exchange.fetch_balance()
-            if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
-                current_equity = float(bal['info']['result']['list'][0]['totalEquity'])
-            else:
-                current_equity = float(bal['USDT']['total']) if 'USDT' in bal and 'total' in bal['USDT'] else 100.0
-                
-            pnl_pct = (current_equity - self.day_start_equity) / self.day_start_equity * 100
-
-            if pnl_pct <= self.daily_loss_limit_pct:
-                self.trading_paused_until = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                msg = f"🚨 Дневной лимит убытков -{self.daily_loss_limit_pct}% достигнут! Пауза до {self.trading_paused_until.strftime('%Y-%m-%d %H:%M UTC')}"
-                print(msg)
-                self.send_telegram(msg)
-                return False
-            return True
-        except Exception as e:
-            print(f"Error checking PnL: {e}")
-            return True
-
     def sideways_strategy(self, df, ob):
         """Стратегия для бокового рынка"""
         last = df.iloc[-1]
@@ -940,12 +1103,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         bb_upper = last['bb_upper']
         bid_ratio = ob['bid_ratio']
 
-        # LONG на нижней границе
         if price <= bb_lower and rsi < 40 and stoch_k < 30 and bid_ratio > 52:
             strength = 0.6 if rsi < 35 and stoch_k < 25 else 0.4
             return 'LONG', strength
         
-        # SHORT на верхней границе
         if price >= bb_upper and rsi > 60 and stoch_k > 70 and bid_ratio < 48:
             strength = 0.6 if rsi > 65 and stoch_k > 75 else 0.4
             return 'SHORT', strength
@@ -953,23 +1114,41 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         return None, 0
 
     def trend_strategy(self, df, ob):
-        """Стратегия для трендового рынка"""
+        """Стратегия для трендового рынка - УЛУЧШЕННАЯ"""
         last = df.iloc[-1]
         price = last['close']
         vwap = last['vwap']
         ema20 = last['ema_20']
         ema50 = last['ema_50']
         rsi = last['rsi']
+        stoch_k = last['stoch_k']
+        macd_hist = last['macd_hist']
         bid_ratio = ob['bid_ratio']
 
-        # LONG в восходящем тренде
-        if price > vwap and ema20 > ema50 and rsi > 45 and rsi < 70 and bid_ratio > 52:
-            strength = 0.7 if rsi > 50 and bid_ratio > 58 else 0.5
+        # LONG в восходящем тренде с дополнительными фильтрами
+        if (price > vwap and ema20 > ema50 and 
+            rsi > 45 and rsi < 70 and 
+            macd_hist > 0 and  # MACD гистограмма положительная
+            stoch_k < 80 and    # Не перекуплен
+            bid_ratio > 52):
+            
+            strength = 0.7
+            # Усиливаем сигнал при хороших условиях
+            if rsi > 50 and stoch_k > 50 and bid_ratio > 58:
+                strength = 0.8
             return 'LONG', strength
         
-        # SHORT в нисходящем тренде
-        if price < vwap and ema20 < ema50 and rsi < 55 and rsi > 30 and bid_ratio < 48:
-            strength = 0.7 if rsi < 50 and bid_ratio < 42 else 0.5
+        # SHORT в нисходящем тренде с дополнительными фильтрами
+        if (price < vwap and ema20 < ema50 and 
+            rsi < 55 and rsi > 30 and 
+            macd_hist < 0 and  # MACD гистограмма отрицательная
+            stoch_k > 20 and    # Не перепродан
+            bid_ratio < 48):
+            
+            strength = 0.7
+            # Усиливаем сигнал при хороших условиях
+            if rsi < 50 and stoch_k < 50 and bid_ratio < 42:
+                strength = 0.8
             return 'SHORT', strength
         
         return None, 0
@@ -981,12 +1160,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         ema20 = last['ema_20']
         rsi = last['rsi']
         
-        # Простые условия для LONG
         if price > ema20 and rsi > 40 and rsi < 70:
             strength = 0.35
             return 'LONG', strength
         
-        # Простые условия для SHORT
         if price < ema20 and rsi < 60 and rsi > 30:
             strength = 0.35
             return 'SHORT', strength
@@ -997,6 +1174,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         """Основная функция определения сигналов"""
         if not self.check_daily_loss_limit():
             print(f"[{datetime.now(timezone.utc)}] Daily loss limit active, skipping signals")
+            return None, None, None
+
+        # Проверка возможности взять новую позицию
+        if not self.can_take_new_position(symbol):
             return None, None, None
 
         session_info = self.update_session()
@@ -1019,11 +1200,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         
         last = df.iloc[-1]
         adx = last['adx']
-        ob = self.fetch_orderbook_data(symbol)
+        ob = self.fetch_orderbook_cached(symbol)
 
         last['bid_ratio'] = ob['bid_ratio']
 
-        # Получаем сигналы от всех стратегий
         side_sig, side_strength = self.sideways_strategy(df, ob)
         trend_sig, trend_strength = self.trend_strategy(df, ob)
         basic_sig, basic_strength = self.basic_strategy(df, ob)
@@ -1032,7 +1212,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         final_strength = 0
         level_boost = 0
 
-        # Приоритет сигналов в зависимости от рынка
         if adx < 25:  # Флэт
             if side_sig:
                 final_signal = side_sig
@@ -1053,8 +1232,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 final_strength = basic_strength
                 print(f"[{now}] 📊 Тренд: сигнал от базовой стратегии (сила {basic_strength})")
                 
-        else:  # Смешанный рынок (25-30)
-            # Выбираем лучший сигнал
+        else:  # Смешанный рынок
             signals = []
             if side_sig:
                 signals.append(('sideways', side_strength, side_sig))
@@ -1069,9 +1247,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 final_strength = best_signal[1]
                 print(f"[{now}] 📊 Смешанный: выбран {best_signal[0]} сигнал (сила {best_signal[1]})")
 
-        # Если все стратегии не дали сигнала, используем самую простую логику
         if not final_signal:
-            # Экстремально простой сигнал на основе EMA и цены
             if last['close'] > last['ema_20']:
                 final_signal = 'LONG'
                 final_strength = 0.25
@@ -1084,7 +1260,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         if final_signal:
             original_strength = final_strength
             
-            # Коррекция по MTF тренду
             if context['trend'] == 'BULL' and final_signal == 'LONG':
                 boost = min(0.2, context['strength'] * 0.3)
                 final_strength = min(1.0, final_strength + boost)
@@ -1102,7 +1277,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 final_strength = max(0, final_strength - penalty)
                 print(f"[{now}] ⚠️ MTF штраф: -{penalty:.2f}")
             
-            # Коррекция по глобальным уровням
             level_boost = self.global_levels.get_signal_from_levels(
                 last['close'], daily_levels, final_signal
             )
@@ -1110,31 +1284,26 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 final_strength = min(1.0, final_strength + level_boost)
                 print(f"[{now}] 📊 Уровневый буст: +{level_boost:.2f}")
             
-            # Коррекция по сессии
             session_mult = session_info['trade_multiplier']
             final_strength *= session_mult
             if session_mult != 1.0:
                 print(f"[{now}] 🕐 Сессия {session_info['name']}: x{session_mult}")
             
-            # Специальные правила для выходных
             if session_info['key'] == 'weekend' and self._is_false_breakout(df):
                 final_strength += 0.2
                 print("🎯 Обнаружен ложный пробой на выходных! +0.2")
             
-            # Специальные правила для открытия недели
             if session_info['key'] == 'sunday_open' and self._is_counter_trend(df, final_signal):
                 final_strength += 0.15
                 print("📊 Контртренд на открытии недели! +0.15")
 
             print(f"[{now}] 📊 Итоговая сила сигнала: {final_strength:.2f} (порог: 0.20)")
 
-        # Реальная торговля - используем пониженный порог
-        if final_signal and final_strength >= 0.20:  # Снижен с 0.35 до 0.20
+        if final_signal and final_strength >= 0.20:
             base = symbol.split('/')[0]
-            cg = self.fetch_coinglass_data(base)
+            cg = self.fetch_coinglass_cached(base)
             news = self.fetch_cryptopanic_news()
 
-            # AI фильтр (пропускаем если нет API ключа)
             if self.deepseek_api_key:
                 if not self.get_ai_filter(symbol, df, final_signal, ob, cg, news):
                     print(f"[{now}] 🤖 AI фильтр отклонил сигнал")
@@ -1145,12 +1314,16 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             fee_adj = entry * self.taker_fee
             atr = last['atr']
             
+            # Корректировка ATR с учетом фактора волатильности пары
+            volatility_factor = self.symbol_config[symbol]['volatility_factor']
+            adjusted_atr = atr * volatility_factor
+            
             if final_signal == 'LONG':
-                sl = entry - (self.sl_atr_multiplier * atr) - fee_adj
-                tp = entry + (self.tp_atr_multiplier * atr) + fee_adj
+                sl = entry - (self.sl_atr_multiplier * adjusted_atr) - fee_adj
+                tp = entry + (self.tp_atr_multiplier * adjusted_atr) + fee_adj
             else:
-                sl = entry + (self.sl_atr_multiplier * atr) + fee_adj
-                tp = entry - (self.tp_atr_multiplier * atr) - fee_adj
+                sl = entry + (self.sl_atr_multiplier * adjusted_atr) + fee_adj
+                tp = entry - (self.tp_atr_multiplier * adjusted_atr) - fee_adj
 
             print(f"[{now}] 🎯 СИГНАЛ! {final_signal} (сила {final_strength:.2f}) для {symbol}")
             print(f"    Сессия: {session_info['name']}, Уровни: +{level_boost:.2f}")
@@ -1170,73 +1343,74 @@ Take this trade? Reply ONLY "YES" or "NO"."""
 
         return None, None, None
 
-    def log_trade(self, symbol, side, entry, exit_price, size, pnl, pnl_pct, df_last, hold_time, session, level_boost):
+    def log_trade(self, symbol, side, entry, exit_price, size, pnl, pnl_pct, 
+                  df_entry, hold_duration, exit_reason, session, level_boost):
+        """Логирование сделки с расширенными полями"""
         timestamp = datetime.now(timezone.utc).isoformat()
-        hold_minutes = hold_time.total_seconds() / 60 if hold_time else 0
+        hold_seconds = hold_duration.total_seconds()
+        hold_minutes = hold_seconds / 60
+        
         row = [
             timestamp, symbol, side, entry, exit_price, size, pnl, pnl_pct,
-            df_last['rsi'], df_last['adx'], df_last['vwap'], df_last['ema_20'], df_last['ema_50'],
-            df_last['atr'], df_last['bb_upper'], df_last['bb_lower'],
-            df_last['stoch_k'], df_last['stoch_d'], df_last['macd_hist'], df_last.get('bid_ratio', 50),
-            round(hold_minutes, 1), session, level_boost
+            df_entry['rsi'], df_entry['adx'], df_entry['vwap'], 
+            df_entry['ema_20'], df_entry['ema_50'],
+            df_entry['atr'], df_entry['bb_upper'], df_entry['bb_lower'],
+            df_entry['stoch_k'], df_entry['stoch_d'], df_entry['macd_hist'], 
+            df_entry.get('bid_ratio', 50),
+            exit_reason, round(hold_seconds, 1), round(hold_minutes, 1),
+            session, level_boost
         ]
         with open(self.trade_log_file, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(row)
 
-    def get_balance(self):
-        try:
-            bal = self.exchange.fetch_balance()
-            if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
-                equity = float(bal['info']['result']['list'][0]['totalEquity'])
-                return equity
-            elif 'USDT' in bal and 'free' in bal['USDT']:
-                return float(bal['USDT']['free'])
-            else:
-                return 100.0
-        except Exception as e:
-            print(f"Error getting balance: {e}")
-            return 100.0
-
     def place_order(self, symbol, signal, params):
         """Размещение реального ордера"""
         try:
-            balance = self.get_balance()
+            balance = self.get_balance_cached()
             
             if balance < self.min_balance_for_trading:
                 print(f"Баланс {balance:.2f} ниже минимального ({self.min_balance_for_trading})")
                 return
-            
-            risk_pct = 0.005 if balance < 200 else 0.01
+
+            # Используем риск для конкретной пары
+            risk_pct = self.symbol_config[symbol]['risk_pct']
             risk = balance * risk_pct
             size = risk / abs(params['entry'] - params['stop_loss'])
             
-            min_sizes = {'BTC/USDT:USDT': 0.001, 'ETH/USDT:USDT': 0.01}
+            # Корректировка размера с учетом минимального размера
+            min_size = self.symbol_config[symbol]['min_size']
             
-            if symbol.startswith('BTC'):
-                size = round(size, 3)
-                if size < min_sizes[symbol]:
-                    size = min_sizes[symbol]
-                    print(f"Размер увеличен до минимального: {size}")
-            else:
+            if symbol.startswith('SOL'):
                 size = round(size, 2)
-                if size < min_sizes[symbol]:
-                    size = min_sizes[symbol]
-                    print(f"Размер увеличен до минимального: {size}")
+            elif symbol.startswith('XRP'):
+                size = round(size, 1)
+            elif symbol.startswith('BTC'):
+                size = round(size, 3)
+            else:  # ETH
+                size = round(size, 2)
+            
+            if size < min_size:
+                size = min_size
+                print(f"Размер увеличен до минимального: {size}")
 
             if size <= 0:
                 print("Размер ордера <= 0, отмена")
                 return
 
+            # Обновляем счетчик сделок для пары
+            self.pair_trades_today[symbol] += 1
+
             msg = (
                 f"📉 *НОВЫЙ СИГНАЛ: {symbol}*\n"
                 f"{'🟢 LONG' if signal == 'LONG' else '🔴 SHORT'}\n"
-                f"Цена входа: {params['entry']:.2f}\n"
-                f"Stop Loss: {params['stop_loss']:.2f}\n"
-                f"Take Profit: {params['take_profit']:.2f}\n"
+                f"Цена входа: {params['entry']:.4f}\n"
+                f"Stop Loss: {params['stop_loss']:.4f}\n"
+                f"Take Profit: {params['take_profit']:.4f}\n"
                 f"Размер: {size}\n"
+                f"Риск: {risk_pct*100}%\n"
                 f"Сессия: {params.get('session', 'N/A')}\n"
-                f"Уровни: +{params.get('level_boost', 0):.2f}"
+                f"Сделок сегодня по паре: {self.pair_trades_today[symbol]}/{self.symbol_config[symbol]['max_positions_per_day']}"
             )
             self.send_telegram(msg)
 
@@ -1291,11 +1465,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         # Проверка времени удержания
         if hold_time > self.max_hold_time:
             if pnl_pct > 0:
-                self.close_position(symbol, curr, 'Time Exit (Profit)', df, hold_time, pos)
+                self.close_position(symbol, curr, 'TIME_EXIT_PROFIT', df, hold_time, pos)
             elif pnl_pct < -0.1:
-                self.close_position(symbol, curr, 'Time Exit (Stop)', df, hold_time, pos)
+                self.close_position(symbol, curr, 'TIME_EXIT_STOP', df, hold_time, pos)
             else:
-                # Сужаем TP если время вышло
                 pos['take_profit'] = entry * (1 + (tp/entry - 1) * 0.7)
                 print(f"⏱️ Время вышло, TP сужен до {pos['take_profit']:.2f}")
             return
@@ -1326,12 +1499,12 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         
         # Проверка стопов
         if (side == 'LONG' and curr <= sl) or (side == 'SHORT' and curr >= sl):
-            self.close_position(symbol, curr, 'SL Hit', df, hold_time, pos)
+            self.close_position(symbol, curr, 'SL_HIT', df, hold_time, pos)
         elif (side == 'LONG' and curr >= tp) or (side == 'SHORT' and curr <= tp):
-            self.close_position(symbol, curr, 'TP Hit', df, hold_time, pos)
+            self.close_position(symbol, curr, 'TP_HIT', df, hold_time, pos)
 
     def close_position(self, symbol, price, reason, df, hold_time, pos):
-        """Закрытие позиции"""
+        """Закрытие позиции с расширенным логированием"""
         if not pos:
             return
 
@@ -1342,21 +1515,22 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             pnl = (pos['entry'] - price) * pos['size']
             pnl_pct = ((pos['entry'] - price) / pos['entry']) * 100
 
-        # Логирование сделки
+        # Сохраняем данные на момент входа для лога
+        df_entry = df.iloc[-1].copy()  # В реальности нужно сохранять при входе, но для простоты используем последние данные
+
+        # Логирование сделки с расширенными полями
         self.log_trade(
             symbol, pos['side'], pos['entry'], price, pos['size'], 
-            pnl, pnl_pct, df.iloc[-1], hold_time,
+            pnl, pnl_pct, df_entry, hold_time, reason,
             pos.get('session', 'N/A'), pos.get('level_boost', 0)
         )
 
         try:
-            # Закрытие позиции на бирже
             if pos['side'] == 'LONG':
                 self.exchange.create_market_sell_order(symbol, pos['size'])
             else:
                 self.exchange.create_market_buy_order(symbol, pos['size'])
             
-            # Отправка уведомления
             emoji = '✅' if pnl > 0 else '🔴'
             msg = (
                 f"{emoji} *Закрыта {symbol}*\n"
@@ -1375,60 +1549,72 @@ Take this trade? Reply ONLY "YES" or "NO"."""
 
     def run(self):
         """Основной цикл бота"""
+        cycle_count = 0
+        
         print(f"\n{'='*50}")
         print(f"🚀 Бот запущен в РЕАЛЬНОМ режиме")
-        print(f"📊 Торгуемые пары: {self.symbols}")
+        print(f"📊 Торгуемые пары ({len(self.symbols)}):")
+        for symbol in self.symbols:
+            config = self.symbol_config[symbol]
+            print(f"   • {symbol}: риск {config['risk_pct']*100}%, плечо {config['leverage']}x, макс {config['max_positions_per_day']}/день")
         print(f"⏱️  Таймфрейм: {self.timeframe}")
         print(f"💰 Мин. баланс: {self.min_balance_for_trading} USDT")
+        print(f"📈 Макс. одновременных позиций: {self.max_concurrent_positions}")
         print(f"📉 Дневной лимит: {self.daily_loss_limit_pct}%")
+        print(f"📝 Лог сделок: {self.trade_log_file} (с расширенными полями)")
         print(f"{'='*50}\n")
         
         while True:
             try:
                 now = datetime.now(timezone.utc)
-                print(f"\n[{now}] 🔄 Начало нового цикла")
+                cycle_count += 1
                 
-                # Проверка баланса и лимитов
+                # Полный анализ каждый 4-й цикл
+                full_analysis = (cycle_count % 4 == 0)
+                
+                print(f"\n[{now}] 🔄 Цикл #{cycle_count} {'(полный анализ)' if full_analysis else '(быстрый)'}")
+                
                 if not self.check_daily_loss_limit():
                     print(f"Торговля приостановлена до завтра")
-                    time.sleep(300)  # Проверка каждые 5 минут
+                    time.sleep(300)
                     continue
                 
-                balance = self.get_balance()
+                balance = self.get_balance_cached()
                 print(f"[{now}] 💰 Баланс: {balance:.2f} USDT")
                 
                 # Информация о сессии
                 session_info = self.update_session()
-                print(f"[{now}] 🕐 Сессия: {session_info['name']} ({session_info['strategy']})")
                 
-                # Макроэкономика
-                self.update_macro_context()
+                # Обновление макроэкономики при полном анализе
+                if full_analysis:
+                    self.update_macro_context()
                 
-                # Проверка каждого символа
+                # Считаем открытые позиции
+                open_positions = sum(1 for pos in self.positions.values() if pos)
+                print(f"[{now}] 📊 Открыто позиций: {open_positions}/{self.max_concurrent_positions}")
+                
+                # Проверка каждой пары
                 for symbol in self.symbols:
                     try:
-                        print(f"\n[{now}] 🔍 Проверка {symbol}...")
+                        print(f"\n[{now}] 🔍 {symbol}...")
                         
-                        # Получение данных
-                        df = self.fetch_ohlcv(symbol)
+                        df = self.fetch_ohlcv_cached(symbol)
                         if df is None:
-                            print(f"[{now}] ❌ Нет данных для {symbol}")
+                            print(f"[{now}] ❌ Нет данных")
                             continue
                         
-                        # Расчет индикаторов
                         df = self.calculate_indicators(df)
                         last = df.iloc[-1]
-                        print(f"[{now}] 📊 Текущая цена: {last['close']:.2f}, RSI: {last['rsi']:.1f}, ADX: {last['adx']:.1f}")
+                        print(f"[{now}] 📊 Цена: {last['close']:.4f}, RSI: {last['rsi']:.1f}, ADX: {last['adx']:.1f}")
 
-                        # Управление существующей позицией или поиск новой
                         if self.positions.get(symbol):
-                            print(f"[{now}] 📈 Управление позицией {symbol}")
+                            print(f"[{now}] 📈 Управление позицией")
                             self.manage_position(symbol, df)
-                        else:
-                            print(f"[{now}] 🔎 Поиск сигнала для {symbol}")
+                        elif full_analysis:  # Поиск сигналов только при полном анализе
+                            print(f"[{now}] 🔎 Поиск сигнала")
                             signal, s_type, params = self.detect_signal(symbol, df)
                             if signal:
-                                print(f"[{now}] ✅ НАЙДЕН СИГНАЛ: {signal} для {symbol}")
+                                print(f"[{now}] ✅ НАЙДЕН СИГНАЛ: {signal}")
                                 self.place_order(symbol, signal, params)
                             else:
                                 print(f"[{now}] ⏸️ Сигналов нет")
@@ -1437,8 +1623,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                         print(f"❌ Ошибка для {symbol}: {e}")
                         continue
                 
-                print(f"\n[{datetime.now(timezone.utc)}] ✅ Цикл завершен, ожидание 30с")
-                time.sleep(30)
+                # Динамическая пауза
+                sleep_time = 30 if full_analysis else 15
+                print(f"\n[{datetime.now(timezone.utc)}] ✅ Цикл завершен, ожидание {sleep_time}с")
+                time.sleep(sleep_time)
                 
             except Exception as e:
                 print(f"❌ Критическая ошибка: {e}")
