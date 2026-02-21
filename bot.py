@@ -236,7 +236,7 @@ class TradingSessions:
             'description': 'Низкая ликвидность, ложные движения',
             'strategy': 'fade',
             'color': '💫',
-            'trade_multiplier': 0.6
+            'trade_multiplier': 0.8  # УВЕЛИЧЕНО С 0.6 ДО 0.8
         },
         'sunday_open': {
             'name': '📊 Открытие недели',
@@ -721,7 +721,8 @@ class BybitScalpingBot:
         self.ai_stats = {
             'total': 0,
             'approved': 0,
-            'rejected': 0
+            'rejected': 0,
+            'random_taken': 0
         }
 
         # Проверка дневного лимита при старте
@@ -730,8 +731,8 @@ class BybitScalpingBot:
         print(f"[{datetime.now(timezone.utc)}] Bot initialized for {len(self.symbols)} symbols: {self.symbols}")
         print(f"[{datetime.now(timezone.utc)}] REAL TRADING MODE ACTIVE")
         print(f"[{datetime.now(timezone.utc)}] Max concurrent positions: {self.max_concurrent_positions}")
-        print(f"[{datetime.now(timezone.utc)}] AI FILTER: ENABLED with smart prompting")
-        self.send_telegram(f"🤖 *Bot started - REAL TRADING*\nSymbols: {', '.join(self.symbols)}\nTimeframe: {self.timeframe}\nMax positions: {self.max_concurrent_positions}\n🤖 AI filter: ENABLED")
+        print(f"[{datetime.now(timezone.utc)}] AI FILTER: ENABLED with simple prompt and 50% random factor")
+        self.send_telegram(f"🤖 *Bot started - REAL TRADING*\nSymbols: {', '.join(self.symbols)}\nTimeframe: {self.timeframe}\nMax positions: {self.max_concurrent_positions}\n🤖 AI filter: ENABLED (50% random factor)")
 
     def _check_rate_limit(self, endpoint):
         now = time.time()
@@ -834,9 +835,15 @@ class BybitScalpingBot:
 
     def send_telegram(self, message):
         try:
+            # Экранируем специальные символы для Markdown
+            message = message.replace('.', '\\.').replace('-', '\\-').replace('_', '\\_')
             self.bot.send_message(self.telegram_chat_id, message, parse_mode='Markdown')
         except Exception as e:
-            print(f"Telegram error: {e}")
+            # Если Markdown не работает, отправляем без форматирования
+            try:
+                self.bot.send_message(self.telegram_chat_id, message)
+            except Exception as e2:
+                print(f"Telegram error: {e2}")
 
     def get_session_info(self):
         return TradingSessions.get_session_info()
@@ -1072,84 +1079,19 @@ class BybitScalpingBot:
         return min(max(strength, 0), 1.0)
 
     def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
-        """Улучшенный AI фильтр с детальным промптом"""
+        """Упрощенный AI фильтр с высоким random фактором"""
         if not self.deepseek_api_key:
             return True
             
         try:
             last = df.iloc[-1]
-            news_text = "\n".join(n.get('title', '') for n in news[:3])
             
-            macro = self.get_macro_signal()
-            session = self.get_session_info()
-            
-            # Расчет 24h изменения
-            if len(df) > 24:
-                change_24h = ((last['close']/df.iloc[-24]['close']-1)*100)
-                change_str = f"{change_24h:.1f}%"
-            else:
-                change_str = "N/A"
-            
-            # Состояния индикаторов
-            rsi_state = ('oversold' if last['rsi'] < 30 else 
-                        'low' if last['rsi'] < 45 else 
-                        'neutral' if last['rsi'] < 55 else 
-                        'high' if last['rsi'] < 70 else 
-                        'overbought')
-            
-            adx_state = ('strong_trend' if last['adx'] > 40 else
-                        'trending' if last['adx'] > 25 else
-                        'weak_trend' if last['adx'] > 20 else
-                        'ranging')
-            
-            trend_alignment = ('aligned' if (
-                (signal == 'LONG' and last['ema_20'] > last['ema_50'] and last['close'] > last['vwap']) or
-                (signal == 'SHORT' and last['ema_20'] < last['ema_50'] and last['close'] < last['vwap'])
-            ) else 'against')
-            
-            # Объем
-            avg_volume = df['volume'].rolling(20).mean().iloc[-1]
-            volume_condition = ('high' if last['volume'] > avg_volume * 1.2 else
-                               'low' if last['volume'] < avg_volume * 0.8 else
-                               'normal')
-            
-            signal_strength = self._calculate_signal_strength(df, signal, orderbook)
-            
-            prompt = f"""You are a crypto scalping expert. Analyze this {signal} signal for {symbol}:
+            # Очень простой промпт
+            prompt = f"""Analyze {signal} signal for {symbol} at ${last['close']:.2f}
+RSI: {last['rsi']:.1f}, ADX: {last['adx']:.1f}, MACD: {last['macd_hist']:.2f}
+Bid Ratio: {orderbook['bid_ratio']:.1f}%
 
-📊 MARKET CONTEXT:
-• Session: {session['name']} ({session['description']})
-• Volatility: {session['volatility']}
-• Macro Sentiment: {macro}
-
-💰 PRICE ACTION:
-• Current Price: ${last['close']:.2f}
-• 24h Change: {change_str}
-
-📈 TECHNICAL INDICATORS:
-• RSI: {last['rsi']:.1f} ({rsi_state})
-• ADX: {last['adx']:.1f} ({adx_state})
-• Stochastic: K={last['stoch_k']:.1f}, D={last['stoch_d']:.1f}
-• MACD Histogram: {last['macd_hist']:.2f}
-• Volume: {volume_condition}
-
-📐 TREND ANALYSIS:
-• Price vs VWAP: {'Above' if last['close']>last['vwap'] else 'Below'} (${last['vwap']:.2f})
-• EMA20/50: {'BULLISH' if last['ema_20']>last['ema_50'] else 'BEARISH'}
-• Trend Alignment: {trend_alignment}
-
-📊 ORDER FLOW:
-• Bid Ratio: {orderbook['bid_ratio']:.1f}% ({'Pro-Buy' if orderbook['bid_ratio']>52 else 'Pro-Sell' if orderbook['bid_ratio']<48 else 'Neutral'})
-
-📰 NEWS:
-{news_text[:200]}...
-
-🎯 SIGNAL QUALITY: {signal_strength:.2f}/1.0
-
-Based on this comprehensive analysis, would you take this scalp trade?
-Consider: risk/reward ratio, technical confluence, and market context.
-
-Reply with ONLY "YES" or "NO"."""
+Should we take this scalp trade? Reply YES or NO."""
 
             print(f"🤖 Отправка запроса к DeepSeek для {symbol} {signal}...")
             
@@ -1162,7 +1104,7 @@ Reply with ONLY "YES" or "NO"."""
                 json={
                     'model': 'deepseek-chat',
                     'messages': [{'role': 'user', 'content': prompt}],
-                    'temperature': 0.2,
+                    'temperature': 0.7,  # Повышено для разнообразия
                     'max_tokens': 10
                 },
                 timeout=15
@@ -1179,15 +1121,17 @@ Reply with ONLY "YES" or "NO"."""
                 self.ai_stats['rejected'] += 1
                 print(f"🤖 ❌ DeepSeek ОТКЛОНИЛ сигнал для {symbol} {signal}")
             
-            # Логирование статистики каждый 10-й запрос
+            # УВЕЛИЧЕНО ДО 50% случайный фактор для отклоненных сигналов
+            if not positive and np.random.random() < 0.5:
+                self.ai_stats['random_taken'] += 1
+                print(f"🎲 Случайный фактор (50%): берем сделку несмотря на NO")
+                return True
+            
+            # Статистика
             if self.ai_stats['total'] % 10 == 0:
                 approval_rate = (self.ai_stats['approved'] / self.ai_stats['total']) * 100
-                print(f"📊 AI Stats: {self.ai_stats['approved']}/{self.ai_stats['total']} одобрено ({approval_rate:.1f}%)")
-            
-            # Случайный фактор для разнообразия (только для отклоненных сигналов)
-            if not positive and np.random.random() < 0.1:  # 10% шанс все равно взять
-                print(f"🎲 Случайный фактор: берем сделку несмотря на NO")
-                return True
+                random_rate = (self.ai_stats['random_taken'] / self.ai_stats['total']) * 100
+                print(f"📊 AI Stats: {self.ai_stats['approved']}/{self.ai_stats['total']} одобрено ({approval_rate:.1f}%), случайно взято: {random_rate:.1f}%")
                 
             return positive
             
@@ -1347,6 +1291,11 @@ Reply with ONLY "YES" or "NO"."""
                 print(f"[{now}] 📊 Запасной сигнал SHORT (цена ниже EMA20)")
 
         if final_signal:
+            # ДОБАВЛЕНО: приоритет LONG в бычьем тренде
+            if context['trend'] == 'BULL' and final_signal == 'LONG':
+                final_strength += 0.2
+                print(f"[{now}] 📈 Дополнительный буст для LONG в бычьем тренде: +0.2")
+            
             if context['trend'] == 'BULL' and final_signal == 'LONG':
                 boost = min(0.2, context['strength'] * 0.3)
                 final_strength = min(1.0, final_strength + boost)
@@ -1384,9 +1333,15 @@ Reply with ONLY "YES" or "NO"."""
                 final_strength += 0.15
                 print("📊 Контртренд на открытии недели! +0.15")
 
-            print(f"[{now}] 📊 Итоговая сила сигнала: {final_strength:.2f} (порог: 0.20)")
+            print(f"[{now}] 📊 Итоговая сила сигнала: {final_strength:.2f}")
 
-        if final_signal and final_strength >= 0.20:
+        # ИЗМЕНЕНО: динамический порог в зависимости от сессии
+        threshold = 0.20
+        if session_info['key'] == 'weekend':
+            threshold = 0.15  # Пониженный порог на выходных
+            print(f"[{now}] 📊 Выходные: пониженный порог {threshold}")
+
+        if final_signal and final_strength >= threshold:
             base = symbol.split('/')[0]
             cg = self.fetch_coinglass_cached(base)
             news = self.fetch_cryptopanic_news()
@@ -1425,7 +1380,7 @@ Reply with ONLY "YES" or "NO"."""
             }
         else:
             if final_signal:
-                print(f"[{now}] ⚠️ Сигнал {final_signal} отклонен: сила {final_strength:.2f} < 0.20")
+                print(f"[{now}] ⚠️ Сигнал {final_signal} отклонен: сила {final_strength:.2f} < {threshold}")
             else:
                 print(f"[{now}] ❌ Нет сигнала: side={side_sig}, trend={trend_sig}, basic={basic_sig}, adx={adx:.1f}")
 
@@ -1637,7 +1592,9 @@ Reply with ONLY "YES" or "NO"."""
         print(f"📈 Макс. одновременных позиций: {self.max_concurrent_positions}")
         print(f"📉 Дневной лимит: {self.daily_loss_limit_pct}%")
         print(f"📝 Лог сделок: {self.trade_log_file}")
-        print(f"🤖 AI FILTER: ENABLED with smart prompting")
+        print(f"🤖 AI FILTER: ENABLED with simple prompt and 50% random factor")
+        print(f"🎯 Weekend threshold: 0.15 (было 0.20)")
+        print(f"📈 LONG priority in BULL trend: +0.2 boost")
         print(f"{'='*50}\n")
         
         while True:
