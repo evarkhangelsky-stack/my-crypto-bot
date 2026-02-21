@@ -102,21 +102,20 @@ class FREDAnalyzer:
         cache_key = 'inflation'
         if cache_key in self.cache:
             data, time = self.cache[cache_key]
-            if datetime.now() - time < timedelta(days=1):  # Кэш на день
+            if datetime.now() - time < timedelta(days=1):
                 return data
         
         if not self.api_key:
             return None
             
         try:
-            # Серия CPIAUCSL - Consumer Price Index for All Urban Consumers
             url = f"{self.base_url}/series/observations"
             params = {
                 'series_id': 'CPIAUCSL',
                 'api_key': self.api_key,
                 'file_type': 'json',
                 'sort_order': 'desc',
-                'limit': 2  # Последние 2 значения для расчета изменения
+                'limit': 2
             }
             
             response = requests.get(url, params=params, timeout=10).json()
@@ -144,18 +143,16 @@ class FREDAnalyzer:
             return None
     
     def _get_inflation_signal(self, change_pct):
-        """Интерпретирует данные по инфляции"""
         if change_pct > 0.5:
-            return 'BEARISH'  # Высокая инфляция - риск повышения ставок (плохо для рискованных активов)
+            return 'BEARISH'
         elif change_pct > 0.2:
             return 'CAUTION'
         elif change_pct < -0.2:
-            return 'BULLISH'   # Дефляция - риск стимулирования (хорошо для рискованных активов)
+            return 'BULLISH'
         else:
             return 'NEUTRAL'
     
     def get_interest_rate(self):
-        """Получает текущую ставку ФРС"""
         cache_key = 'interest_rate'
         if cache_key in self.cache:
             data, time = self.cache[cache_key]
@@ -166,7 +163,6 @@ class FREDAnalyzer:
             return None
             
         try:
-            # Серия FEDFUNDS - Effective Federal Funds Rate
             url = f"{self.base_url}/series/observations"
             params = {
                 'series_id': 'FEDFUNDS',
@@ -191,67 +187,85 @@ class FREDAnalyzer:
 
 
 class TradingSessions:
-    """Анализ торговых сессий и их влияния на волатильность"""
+    """Анализ торговых сессий - торгуем всегда, но с разными стратегиями"""
     
-    # Временные зоны (UTC)
     SESSIONS = {
         'asia': {
             'name': '🇯🇵 Азиатская',
-            'start': 0,    # 00:00 UTC
-            'end': 8,      # 08:00 UTC
+            'start': 0,
+            'end': 8,
             'volatility': 'medium',
-            'description': 'Спокойное время, флэт/накопление',
+            'description': 'Спокойное накопление',
             'strategy': 'range',
-            'color': '🟡'
+            'color': '🟡',
+            'trade_multiplier': 0.8
         },
         'london': {
             'name': '🇬🇧 Лондонская',
-            'start': 8,     # 08:00 UTC
-            'end': 16,      # 16:00 UTC
+            'start': 8,
+            'end': 16,
             'volatility': 'high',
-            'description': 'Начало движения, первые тренды',
+            'description': 'Трендовое движение',
             'strategy': 'trend',
-            'color': '🔵'
+            'color': '🔵',
+            'trade_multiplier': 1.0
         },
         'ny': {
             'name': '🇺🇸 Нью-Йоркская',
-            'start': 13,    # 13:00 UTC
-            'end': 21,      # 21:00 UTC
+            'start': 13,
+            'end': 21,
             'volatility': 'very_high',
-            'description': 'Активная торговля, сильные движения',
+            'description': 'Активная торговля',
             'strategy': 'breakout',
-            'color': '🔴'
+            'color': '🔴',
+            'trade_multiplier': 1.2
         },
         'london_ny_overlap': {
             'name': '🇬🇧🇺🇸 Перекрытие',
-            'start': 13,    # 13:00 UTC
-            'end': 16,      # 16:00 UTC
+            'start': 13,
+            'end': 16,
             'volatility': 'extreme',
-            'description': 'Пик активности, лучшие движения',
+            'description': 'Пик активности',
             'strategy': 'momentum',
-            'color': '⚡'
+            'color': '⚡',
+            'trade_multiplier': 1.5
         },
         'weekend': {
-            'name': '😴 Выходные',
-            'volatility': 'low',
-            'description': 'Низкая ликвидность, осторожно',
-            'strategy': 'rest',
-            'color': '💤'
+            'name': '🎯 Выходные',
+            'volatility': 'special',
+            'description': 'Низкая ликвидность, ложные движения',
+            'strategy': 'fade',
+            'color': '💫',
+            'trade_multiplier': 0.6
+        },
+        'sunday_open': {
+            'name': '📊 Открытие недели',
+            'start': 21,
+            'end': 0,
+            'volatility': 'high',
+            'description': 'Контртренд на открытии',
+            'strategy': 'counter_trend',
+            'color': '🌟',
+            'trade_multiplier': 0.9
         }
     }
     
     @staticmethod
     def get_current_session():
-        """Определяет текущую торговую сессию"""
+        """Определяет текущую сессию"""
         now = datetime.now(timezone.utc)
         hour = now.hour
         weekday = now.weekday()
         
-        # Выходные
-        if weekday >= 5:  # Суббота (5) или Воскресенье (6)
+        # Воскресенье 21:00 - 00:00 (особое окно)
+        if weekday == 6 and hour >= 21:
+            return 'sunday_open', TradingSessions.SESSIONS['sunday_open']
+        
+        # Выходные (но не воскресное открытие)
+        if weekday >= 5:
             return 'weekend', TradingSessions.SESSIONS['weekend']
         
-        # Перекрытие Лондон-Нью-Йорк (приоритет)
+        # Перекрытие Лондон-Нью-Йорк
         if 13 <= hour < 16:
             return 'london_ny_overlap', TradingSessions.SESSIONS['london_ny_overlap']
         # Нью-Йорк
@@ -260,21 +274,19 @@ class TradingSessions:
         # Лондон
         elif 8 <= hour < 16:
             return 'london', TradingSessions.SESSIONS['london']
-        # Азия (включая поздний вечер)
+        # Азия
         else:
             return 'asia', TradingSessions.SESSIONS['asia']
     
     @staticmethod
     def get_session_info():
-        """Возвращает полную информацию о текущей сессии"""
         session_key, session = TradingSessions.get_current_session()
         
         now = datetime.now(timezone.utc)
         hour = now.hour
         minute = now.minute
         
-        # Для неперекрывающихся сессий добавляем время до конца
-        if session_key not in ['london_ny_overlap', 'weekend']:
+        if session_key not in ['weekend', 'sunday_open'] and 'end' in session:
             end_hour = session['end']
             if end_hour <= hour:
                 end_hour += 24
@@ -295,7 +307,7 @@ class TradingSessions:
             'strategy': session['strategy'],
             'color': session['color'],
             'time_left': time_left,
-            'hour_utc': hour
+            'trade_multiplier': session['trade_multiplier']
         }
 
 
@@ -314,9 +326,6 @@ class MultiTimeframeAnalyzer:
         self.cache = {}
         
     def get_trend_context(self, symbol):
-        """
-        Возвращает контекст тренда со всех ТФ
-        """
         context = {
             'trend': 'NEUTRAL',
             'strength': 0,
@@ -360,7 +369,6 @@ class MultiTimeframeAnalyzer:
                 context['strength'] = abs(avg_score)
                 context['description'] = f"⬇️ Медвежий тренд (сила {abs(avg_score):.2f})"
             
-            # Проверяем согласованность ТФ
             bull_count = sum(1 for d in directions if d == 'BULL')
             bear_count = sum(1 for d in directions if d == 'BEAR')
             
@@ -378,7 +386,6 @@ class MultiTimeframeAnalyzer:
         return context
     
     def _get_cached_data(self, symbol, timeframe, cache_ttl_minutes):
-        """Получает данные с кэшированием"""
         now = datetime.now(timezone.utc)
         cache_key = f"{symbol}_{timeframe}"
         
@@ -405,16 +412,12 @@ class MultiTimeframeAnalyzer:
             return None
     
     def _analyze_timeframe(self, df):
-        """
-        Анализирует один таймфрейм
-        """
         last = df.iloc[-1]
         prev = df.iloc[-5]
         
         score = 0
         reasons = []
         
-        # EMA alignment
         if last['ema_20'] > last['ema_50']:
             score += 0.4
             reasons.append("EMA20 > EMA50")
@@ -422,7 +425,6 @@ class MultiTimeframeAnalyzer:
             score -= 0.4
             reasons.append("EMA20 < EMA50")
         
-        # Цена относительно EMA20
         if last['close'] > last['ema_20']:
             score += 0.3
             reasons.append("Цена выше EMA20")
@@ -430,7 +432,6 @@ class MultiTimeframeAnalyzer:
             score -= 0.3
             reasons.append("Цена ниже EMA20")
         
-        # RSI направление
         if last['rsi'] > 50:
             score += 0.2
             reasons.append(f"RSI {last['rsi']:.1f} > 50")
@@ -438,7 +439,6 @@ class MultiTimeframeAnalyzer:
             score -= 0.2
             reasons.append(f"RSI {last['rsi']:.1f} < 50")
         
-        # Моментум
         if last['close'] > prev['close']:
             score += 0.1
             reasons.append("Цена растет")
@@ -467,7 +467,6 @@ class GlobalLevels:
         self.cache = {}
         
     def get_daily_levels(self, symbol):
-        """Получает уровни открытия/закрытия дня"""
         cache_key = f"{symbol}_daily"
         now = datetime.now(timezone.utc)
         
@@ -501,7 +500,6 @@ class GlobalLevels:
             return None
     
     def _get_position(self, price, open_, high, low):
-        """Определяет позицию цены относительно диапазона дня"""
         range_size = high - low
         if range_size == 0:
             return 'MIDDLE'
@@ -518,15 +516,14 @@ class GlobalLevels:
             return 'HIGH'
     
     def _get_psychological_levels(self, price):
-        """Психологические уровни (круглые числа)"""
         levels = []
         
-        if price > 1000:  # BTC
+        if price > 1000:
             base = round(price / 1000) * 1000
             for i in [-2, -1, 0, 1, 2]:
                 levels.append(base + i * 1000)
         
-        if price > 100:  # ETH
+        if price > 100:
             base = round(price / 100) * 100
             for i in [-2, -1, 0, 1, 2]:
                 levels.append(base + i * 100)
@@ -534,20 +531,17 @@ class GlobalLevels:
         return sorted(levels)
     
     def get_signal_from_levels(self, price, levels, side):
-        """Генерирует сигнал на основе глобальных уровней"""
         if not levels:
             return 0
         
         boost = 0
         
-        # Цена около дневного открытия
         if abs(price - levels['today_open']) / levels['today_open'] < 0.002:
             if side == 'LONG' and price > levels['today_open']:
                 boost += 0.1
             elif side == 'SHORT' and price < levels['today_open']:
                 boost += 0.1
         
-        # Цена на экстремумах дня
         if price >= levels['today_high'] * 0.998:
             if side == 'SHORT':
                 boost += 0.15
@@ -555,7 +549,6 @@ class GlobalLevels:
             if side == 'LONG':
                 boost += 0.15
         
-        # Психологические уровни
         for psych_level in levels.get('psychological', []):
             if abs(price - psych_level) / psych_level < 0.001:
                 if side == 'LONG' and price > psych_level:
@@ -569,7 +562,6 @@ class GlobalLevels:
 
 class BybitScalpingBot:
     def __init__(self):
-        # API keys
         self.api_key = os.getenv('BYBIT_API_KEY')
         self.api_secret = os.getenv('BYBIT_API_SECRET')
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -580,7 +572,6 @@ class BybitScalpingBot:
         self.cryptopanic_api_plan = os.getenv('CRYPTOPANIC_API_PLAN', 'developer')
         self.fred_api_key = os.getenv('FRED_API_KEY')
 
-        # Кэш для CryptoPanic
         self.cryptopanic_cache = []
         self.cryptopanic_cache_time = None
         self.cryptopanic_cache_duration = timedelta(hours=1)
@@ -609,26 +600,22 @@ class BybitScalpingBot:
         self.timeframe = '5m'
         self.positions = {s: None for s in self.symbols}
 
-        # Торговые параметры
         self.sl_atr_multiplier = 1.2
         self.tp_atr_multiplier = 2.0
         self.trailing_stop_percent = 0.5
         self.taker_fee = 0.0006
 
-        # Управление позициями
         self.max_hold_time = timedelta(hours=2)
         self.min_profit_for_breakeven = 0.3
         self.trailing_activation = 0.5
         self.trailing_distance = 0.3
         self.min_balance_for_trading = 50
 
-        # Daily loss limit
         self.daily_loss_limit_pct = -4.2
         self.last_day = None
         self.day_start_equity = None
         self.trading_paused_until = None
 
-        # CSV лог
         self.trade_log_file = "trade_log.csv"
         if not os.path.exists(self.trade_log_file):
             with open(self.trade_log_file, 'w', newline='') as f:
@@ -640,7 +627,6 @@ class BybitScalpingBot:
                     'session', 'global_level_boost'
                 ])
 
-        # Анализаторы
         self.mtf_analyzer = MultiTimeframeAnalyzer(self.exchange)
         self.mtf_context = {}
         self.mtf_last_update = {}
@@ -652,7 +638,6 @@ class BybitScalpingBot:
         self.global_levels = GlobalLevels(self.exchange)
         self.levels_cache = {}
 
-        # Параметры для сессий
         self.session_trades = {}
         self.current_session = None
         self.last_session_message = None
@@ -667,20 +652,14 @@ class BybitScalpingBot:
             print(f"Telegram error: {e}")
 
     def get_session_info(self):
-        """Возвращает информацию о текущей торговой сессии"""
         return TradingSessions.get_session_info()
 
     def update_session(self):
-        """Обновляет информацию о сессии и отправляет уведомление при смене"""
         session_info = self.get_session_info()
         
         if self.current_session != session_info['key']:
             self.current_session = session_info['key']
             
-            # Сбрасываем счетчик сделок для новой сессии
-            self.session_trades = {self.current_session: 0}
-            
-            # Отправляем уведомление (не чаще раза в час)
             now = datetime.now(timezone.utc)
             if not self.last_session_message or now - self.last_session_message > timedelta(minutes=30):
                 msg = (
@@ -688,14 +667,49 @@ class BybitScalpingBot:
                     f"{session_info['name']}\n"
                     f"Волатильность: {session_info['volatility']}\n"
                     f"Стратегия: {session_info['strategy']}\n"
-                    f"Описание: {session_info['description']}"
+                    f"Описание: {session_info['description']}\n"
+                    f"Множитель риска: {session_info['trade_multiplier']:.1f}x"
                 )
                 self.send_telegram(msg)
                 self.last_session_message = now
             
-            print(f"[{now}] 🕐 Сессия: {session_info['name']} | {session_info['description']}")
+            print(f"[{now}] 🕐 Сессия: {session_info['name']} | {session_info['description']} | x{session_info['trade_multiplier']}")
         
         return session_info
+
+    def _is_false_breakout(self, df):
+        """Определяет ложный пробой для выходных"""
+        if len(df) < 20:
+            return False
+        
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        high_20 = df['high'].iloc[-20:].max()
+        low_20 = df['low'].iloc[-20:].min()
+        
+        # Пробой выше 20-периодного максимума, но закрытие ниже
+        if last['high'] > high_20 and last['close'] < high_20:
+            return True
+        # Пробой ниже 20-периодного минимума, но закрытие выше
+        if last['low'] < low_20 and last['close'] > low_20:
+            return True
+        
+        return False
+
+    def _is_counter_trend(self, df, signal):
+        """Определяет контртренд для открытия недели"""
+        if len(df) < 50:
+            return False
+        
+        last = df.iloc[-1]
+        ema_50 = last['ema_50']
+        
+        if signal == 'LONG' and last['close'] < ema_50 * 0.98:
+            return True
+        if signal == 'SHORT' and last['close'] > ema_50 * 1.02:
+            return True
+        
+        return False
 
     def fetch_ohlcv(self, symbol, limit=1000):
         try:
@@ -951,13 +965,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         if not self.check_daily_loss_limit():
             return None, None, None
 
-        # Обновляем сессию
         session_info = self.update_session()
         
-        # Обновляем макроэкономику
         self.update_macro_context()
         
-        # Обновляем MTF контекст
         now = datetime.now(timezone.utc)
         if (symbol not in self.mtf_last_update or 
             now - self.mtf_last_update.get(symbol, now) > timedelta(minutes=5)):
@@ -970,7 +981,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         context = self.mtf_context.get(symbol, {'trend': 'NEUTRAL', 'strength': 0, 'alignment': 'NEUTRAL'})
         macro_signal = self.get_macro_signal()
         
-        # Получаем глобальные уровни
         daily_levels = self.global_levels.get_daily_levels(symbol)
         
         last = df.iloc[-1]
@@ -1011,7 +1021,7 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         if final_signal:
             original_strength = final_strength
             
-            # 1. Коррекция по MTF тренду
+            # Коррекция по MTF тренду
             if context['trend'] == 'BULL' and final_signal == 'LONG':
                 boost = min(0.2, context['strength'] * 0.3)
                 final_strength = min(1.0, final_strength + boost)
@@ -1025,18 +1035,25 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 penalty = min(0.3, context['strength'] * 0.4)
                 final_strength = max(0, final_strength - penalty)
             
-            # 2. Коррекция по глобальным уровням
+            # Коррекция по глобальным уровням
             level_boost = self.global_levels.get_signal_from_levels(
                 last['close'], daily_levels, final_signal
             )
             if level_boost > 0:
                 final_strength = min(1.0, final_strength + level_boost)
             
-            # 3. Коррекция по сессии
-            if session_info['volatility'] in ['very_high', 'extreme']:
-                final_strength = min(1.0, final_strength + 0.1)
-            elif session_info['volatility'] == 'low':
-                final_strength = max(0, final_strength - 0.1)
+            # Коррекция по сессии
+            final_strength *= session_info['trade_multiplier']
+            
+            # Специальные правила для выходных
+            if session_info['key'] == 'weekend' and self._is_false_breakout(df):
+                final_strength += 0.2
+                print("🎯 Обнаружен ложный пробой на выходных!")
+            
+            # Специальные правила для открытия недели
+            if session_info['key'] == 'sunday_open' and self._is_counter_trend(df, final_signal):
+                final_strength += 0.15
+                print("📊 Контртренд на открытии недели!")
 
         if final_signal and final_strength >= 0.35:
             base = symbol.split('/')[0]
@@ -1056,9 +1073,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             else:
                 sl = entry + (self.sl_atr_multiplier * atr) + fee_adj
                 tp = entry - (self.tp_atr_multiplier * atr) - fee_adj
-
-            # Увеличиваем счетчик сделок в сессии
-            self.session_trades[session_info['key']] = self.session_trades.get(session_info['key'], 0) + 1
 
             print(f"[{now}] 🎯 СИГНАЛ! {final_signal} (сила {final_strength:.2f}) для {symbol}")
             print(f"    Сессия: {session_info['name']}, Уровни: +{level_boost:.2f}")
@@ -1181,7 +1195,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
         else:
             pnl_pct = ((entry - curr) / entry) * 100
         
-        # Временной стоп
         if hold_time > self.max_hold_time:
             if pnl_pct > 0:
                 self.close_position(symbol, curr, 'Time Exit (Profit)', df, hold_time, pos)
@@ -1191,12 +1204,10 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 pos['take_profit'] = entry * (1 + (tp/entry - 1) * 0.7)
             return
         
-        # Безубыток
         if pnl_pct > self.min_profit_for_breakeven and not pos.get('breakeven_activated'):
             pos['stop_loss'] = entry
             pos['breakeven_activated'] = True
         
-        # Трейлинг
         if pnl_pct > self.trailing_activation and not pos.get('trailing_activated'):
             pos['trailing_activated'] = True
         
@@ -1210,7 +1221,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
                 if new_sl < pos['stop_loss']:
                     pos['stop_loss'] = new_sl
         
-        # SL/TP
         if (side == 'LONG' and curr <= sl) or (side == 'SHORT' and curr >= sl):
             self.close_position(symbol, curr, 'SL Hit', df, hold_time, pos)
         elif (side == 'LONG' and curr >= tp) or (side == 'SHORT' and curr <= tp):
@@ -1227,7 +1237,6 @@ Take this trade? Reply ONLY "YES" or "NO"."""
             pnl = (pos['entry'] - price) * pos['size']
             pnl_pct = ((pos['entry'] - price) / pos['entry']) * 100
 
-        # Логируем
         self.log_trade(
             symbol, pos['side'], pos['entry'], price, pos['size'], 
             pnl, pnl_pct, df.iloc[-1], hold_time,
