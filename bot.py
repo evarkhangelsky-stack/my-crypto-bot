@@ -7,6 +7,7 @@ import requests
 from datetime import datetime, timedelta, timezone
 import telebot
 import csv
+import json
 
 class TechnicalIndicators:
     """Собственные технические индикаторы"""
@@ -88,99 +89,202 @@ class TechnicalIndicators:
         return macd_line, signal_line, histogram
 
 
+class FREDAnalyzer:
+    """Анализ макроэкономических данных из FRED (Federal Reserve)"""
+    
+    def __init__(self, api_key=None):
+        self.api_key = api_key or os.getenv('FRED_API_KEY')
+        self.base_url = "https://api.stlouisfed.org/fred"
+        self.cache = {}
+        
+    def get_inflation_data(self):
+        """Получает последние данные по инфляции (CPI)"""
+        cache_key = 'inflation'
+        if cache_key in self.cache:
+            data, time = self.cache[cache_key]
+            if datetime.now() - time < timedelta(days=1):  # Кэш на день
+                return data
+        
+        if not self.api_key:
+            return None
+            
+        try:
+            # Серия CPIAUCSL - Consumer Price Index for All Urban Consumers
+            url = f"{self.base_url}/series/observations"
+            params = {
+                'series_id': 'CPIAUCSL',
+                'api_key': self.api_key,
+                'file_type': 'json',
+                'sort_order': 'desc',
+                'limit': 2  # Последние 2 значения для расчета изменения
+            }
+            
+            response = requests.get(url, params=params, timeout=10).json()
+            observations = response['observations']
+            
+            if len(observations) >= 2:
+                current = float(observations[0]['value'])
+                previous = float(observations[1]['value'])
+                change_pct = ((current - previous) / previous) * 100
+                
+                result = {
+                    'current_cpi': current,
+                    'previous_cpi': previous,
+                    'monthly_change_pct': change_pct,
+                    'date': observations[0]['date'],
+                    'trend': 'INCREASING' if change_pct > 0.2 else 'DECREASING' if change_pct < -0.2 else 'STABLE',
+                    'signal': self._get_inflation_signal(change_pct)
+                }
+                
+                self.cache[cache_key] = (result, datetime.now())
+                return result
+                
+        except Exception as e:
+            print(f"FRED error: {e}")
+            return None
+    
+    def _get_inflation_signal(self, change_pct):
+        """Интерпретирует данные по инфляции"""
+        if change_pct > 0.5:
+            return 'BEARISH'  # Высокая инфляция - риск повышения ставок (плохо для рискованных активов)
+        elif change_pct > 0.2:
+            return 'CAUTION'
+        elif change_pct < -0.2:
+            return 'BULLISH'   # Дефляция - риск стимулирования (хорошо для рискованных активов)
+        else:
+            return 'NEUTRAL'
+    
+    def get_interest_rate(self):
+        """Получает текущую ставку ФРС"""
+        cache_key = 'interest_rate'
+        if cache_key in self.cache:
+            data, time = self.cache[cache_key]
+            if datetime.now() - time < timedelta(days=1):
+                return data
+                
+        if not self.api_key:
+            return None
+            
+        try:
+            # Серия FEDFUNDS - Effective Federal Funds Rate
+            url = f"{self.base_url}/series/observations"
+            params = {
+                'series_id': 'FEDFUNDS',
+                'api_key': self.api_key,
+                'file_type': 'json',
+                'sort_order': 'desc',
+                'limit': 1
+            }
+            
+            response = requests.get(url, params=params, timeout=10).json()
+            rate = float(response['observations'][0]['value'])
+            result = {
+                'rate': rate,
+                'date': response['observations'][0]['date'],
+                'environment': 'HIGH_RATE' if rate > 5 else 'MEDIUM_RATE' if rate > 2 else 'LOW_RATE'
+            }
+            self.cache[cache_key] = (result, datetime.now())
+            return result
+        except Exception as e:
+            print(f"FRED rate error: {e}")
+            return None
+
+
 class MultiTimeframeAnalyzer:
-    """Анализирует старшие таймфреймы для определения глобального тренда"""
+    """Анализирует все таймфреймы от 15m до 1d"""
     
     def __init__(self, exchange):
         self.exchange = exchange
         self.timeframes = {
-            '1h': {'weight': 0.3, 'name': 'Часовой'},
-            '4h': {'weight': 0.4, 'name': '4-часовой'},
-            '1d': {'weight': 0.3, 'name': 'Дневной'},
+            '15m': {'weight': 0.15, 'name': '15-минутный', 'cache_ttl': 5},    # Кэш 5 мин
+            '30m': {'weight': 0.20, 'name': '30-минутный', 'cache_ttl': 10},   # Кэш 10 мин
+            '1h': {'weight': 0.25, 'name': 'Часовой', 'cache_ttl': 15},         # Кэш 15 мин
+            '4h': {'weight': 0.25, 'name': '4-часовой', 'cache_ttl': 60},       # Кэш 1 час
+            '1d': {'weight': 0.15, 'name': 'Дневной', 'cache_ttl': 240},        # Кэш 4 часа
         }
         self.cache = {}
-        self.cache_ttl = {
-            '1h': timedelta(minutes=15),   # Обновляем раз в 15 минут
-            '4h': timedelta(hours=1),       # Раз в час
-            '1d': timedelta(hours=4),       # Раз в 4 часа
-        }
         
     def get_trend_context(self, symbol):
         """
-        Возвращает контекст тренда со старших ТФ
+        Возвращает контекст тренда со всех ТФ
         """
         context = {
             'trend': 'NEUTRAL',
             'strength': 0,
             'description': '↔️ Смешанный тренд',
-            'details': {}
+            'details': {},
+            'alignment': 'NEUTRAL',
+            'score': 0
         }
         
         total_score = 0
         total_weight = 0
+        directions = []
         
         for tf, config in self.timeframes.items():
-            df = self._get_cached_data(symbol, tf)
-            if df is None or len(df) < 50:
+            df = self._get_cached_data(symbol, tf, config['cache_ttl'])
+            if df is None or len(df) < 30:
                 continue
                 
-            # Анализируем тренд на этом ТФ
             tf_trend, tf_score, tf_desc = self._analyze_timeframe(df)
             
-            # Сохраняем детали
             context['details'][tf] = {
                 'trend': tf_trend,
                 'score': tf_score,
                 'description': tf_desc
             }
             
-            # Добавляем взвешенный вклад
+            directions.append(tf_trend)
             total_score += tf_score * config['weight']
             total_weight += config['weight']
         
         if total_weight > 0:
             avg_score = total_score / total_weight
+            context['score'] = avg_score
             
             # Определяем общий тренд
-            if avg_score > 0.3:
+            if avg_score > 0.2:
                 context['trend'] = 'BULL'
                 context['strength'] = avg_score
                 context['description'] = f"⬆️ Бычий тренд (сила {avg_score:.2f})"
-            elif avg_score < -0.3:
+            elif avg_score < -0.2:
                 context['trend'] = 'BEAR'
                 context['strength'] = abs(avg_score)
                 context['description'] = f"⬇️ Медвежий тренд (сила {abs(avg_score):.2f})"
+            
+            # Проверяем согласованность ТФ
+            if all(d == 'BULL' for d in directions if d != 'NEUTRAL'):
+                context['alignment'] = 'STRONG_BULL'
+            elif all(d == 'BEAR' for d in directions if d != 'NEUTRAL'):
+                context['alignment'] = 'STRONG_BEAR'
+            elif len(set(directions)) == 1:
+                context['alignment'] = 'CONSISTENT'
             else:
-                context['description'] = f"↔️ Флэт/смешанный тренд"
+                context['alignment'] = 'MIXED'
         
         return context
     
-    def _get_cached_data(self, symbol, timeframe):
+    def _get_cached_data(self, symbol, timeframe, cache_ttl_minutes):
         """Получает данные с кэшированием"""
         now = datetime.now(timezone.utc)
         cache_key = f"{symbol}_{timeframe}"
         
-        # Проверяем кэш
         if cache_key in self.cache:
             data, timestamp = self.cache[cache_key]
-            if now - timestamp < self.cache_ttl[timeframe]:
+            if now - timestamp < timedelta(minutes=cache_ttl_minutes):
                 return data
         
-        # Загружаем свежие данные
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=100)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             
-            # Рассчитываем индикаторы для этого ТФ
             df['ema_20'] = TechnicalIndicators.ema(df['close'], period=20)
             df['ema_50'] = TechnicalIndicators.ema(df['close'], period=50)
             df['rsi'] = TechnicalIndicators.rsi(df['close'], period=14)
             
-            # Сохраняем в кэш
             self.cache[cache_key] = (df, now)
             print(f"[{now}] MTF: Загружен {timeframe} для {symbol}")
-            
             return df
             
         except Exception as e:
@@ -257,6 +361,7 @@ class BybitScalpingBot:
         self.coinglass_api_key = os.getenv('COINGLASS_API_KEY')
         self.cryptopanic_api_key = os.getenv('CRYPTOPANIC_API_KEY')
         self.cryptopanic_api_plan = os.getenv('CRYPTOPANIC_API_PLAN', 'developer')
+        self.fred_api_key = os.getenv('FRED_API_KEY')
 
         # Кэш для CryptoPanic
         self.cryptopanic_cache = []
@@ -287,11 +392,20 @@ class BybitScalpingBot:
         self.timeframe = '5m'
         self.positions = {s: None for s in self.symbols}
 
+        # Торговые параметры
         self.sl_atr_multiplier = 1.2
         self.tp_atr_multiplier = 2.0
         self.trailing_stop_percent = 0.5
         self.taker_fee = 0.0006
 
+        # Новые параметры управления позициями
+        self.max_hold_time = timedelta(hours=2)      # Максимальное время удержания
+        self.min_profit_for_breakeven = 0.3          # % при котором передвигаем SL в безубыток
+        self.trailing_activation = 0.5                # % для активации трейлинга
+        self.trailing_distance = 0.3                   # % отступа трейлинга
+        self.min_balance_for_trading = 50              # Минимальный баланс для торговли
+
+        # Daily loss limit
         self.daily_loss_limit_pct = -4.2
         self.last_day = None
         self.day_start_equity = None
@@ -305,13 +419,18 @@ class BybitScalpingBot:
                 writer.writerow([
                     'timestamp', 'symbol', 'side', 'entry', 'exit', 'size', 'pnl', 'pnl_pct',
                     'rsi', 'adx', 'vwap', 'ema_20', 'ema_50', 'atr', 'bb_upper', 'bb_lower',
-                    'stoch_k', 'stoch_d', 'macd_hist', 'bid_ratio'
+                    'stoch_k', 'stoch_d', 'macd_hist', 'bid_ratio', 'hold_time_minutes'
                 ])
 
-        # Добавляем мультитаймфреймовый анализатор
+        # Мультитаймфреймовый анализатор
         self.mtf_analyzer = MultiTimeframeAnalyzer(self.exchange)
-        self.mtf_context = {}  # Будет хранить последний контекст для каждого символа
-        self.mtf_last_update = {}  # Для отслеживания времени обновления
+        self.mtf_context = {}
+        self.mtf_last_update = {}
+
+        # FRED анализатор
+        self.fred = FREDAnalyzer(self.fred_api_key)
+        self.macro_context = {}
+        self.macro_last_update = None
 
         print(f"[{datetime.now(timezone.utc)}] Bot initialized for {self.symbols}")
         self.send_telegram(f"Bot started\nSymbols: {' '.join(self.symbols)}\nTimeframe: {self.timeframe}")
@@ -390,6 +509,46 @@ class BybitScalpingBot:
             print(f"[{now}] CryptoPanic error: {e}")
             return self.cryptopanic_cache if self.cryptopanic_cache else []
 
+    def update_macro_context(self):
+        """Обновляет макроэкономический контекст (раз в день)"""
+        now = datetime.now(timezone.utc)
+        
+        if self.macro_last_update and now - self.macro_last_update < timedelta(days=1):
+            return self.macro_context
+        
+        inflation = self.fred.get_inflation_data()
+        rates = self.fred.get_interest_rate()
+        
+        self.macro_context = {
+            'inflation': inflation,
+            'rates': rates,
+            'timestamp': now
+        }
+        self.macro_last_update = now
+        
+        if inflation:
+            print(f"[{now}] 📊 Макроэкономика: Инфляция {inflation['monthly_change_pct']:.2f}% ({inflation['signal']})")
+        if rates:
+            print(f"[{now}] 📊 Ставка ФРС: {rates['rate']}% ({rates['environment']})")
+        
+        return self.macro_context
+
+    def get_macro_signal(self):
+        """Возвращает макроэкономический сигнал для трейдинга"""
+        if not self.macro_context:
+            return 'NEUTRAL'
+        
+        inflation = self.macro_context.get('inflation', {})
+        rates = self.macro_context.get('rates', {})
+        
+        # Комбинируем сигналы
+        if inflation.get('signal') == 'BEARISH' and rates.get('environment') == 'HIGH_RATE':
+            return 'BEARISH'
+        elif inflation.get('signal') == 'BULLISH' and rates.get('environment') == 'LOW_RATE':
+            return 'BULLISH'
+        else:
+            return 'NEUTRAL'
+
     def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
         """Смягченный AI фильтр с подробным промптом"""
         if not self.deepseek_api_key:
@@ -397,6 +556,9 @@ class BybitScalpingBot:
         try:
             last = df.iloc[-1]
             news_text = "\n".join(n.get('title', '') for n in news[:3])
+            
+            # Добавляем макроэкономический контекст
+            macro = self.get_macro_signal()
             
             # Определяем состояние рынка для промпта
             rsi_state = 'oversold' if last['rsi'] < 30 else 'overbought' if last['rsi'] > 70 else 'neutral'
@@ -432,6 +594,7 @@ ORDER FLOW:
 
 MARKET SENTIMENT:
 • Coinglass L/S: {coinglass.get('longShortRatio', 'N/A')}
+• Macro Outlook: {macro}
 • News: {news_text[:150]}...
 
 SCALP TRADING CONTEXT:
@@ -475,7 +638,7 @@ Reply with ONLY "YES" or "NO"."""
             
         except Exception as e:
             print(f"[{datetime.now(timezone.utc)}] ⚠️ AI error: {e}")
-            return True  # При ошибке пропускаем
+            return True
 
     def calculate_indicators(self, df):
         df['vwap'] = TechnicalIndicators.vwap(df['high'], df['low'], df['close'], df['volume'])
@@ -590,19 +753,23 @@ Reply with ONLY "YES" or "NO"."""
         if not self.check_daily_loss_limit():
             return None, None, None
 
-        # Обновляем контекст старших ТФ (не чаще чем раз в 15 минут)
+        # Обновляем макроэкономические данные (раз в день)
+        self.update_macro_context()
+        
+        # Обновляем контекст старших ТФ (не чаще чем раз в 5 минут)
         now = datetime.now(timezone.utc)
         if (symbol not in self.mtf_last_update or 
-            now - self.mtf_last_update.get(symbol, now) > timedelta(minutes=15)):
+            now - self.mtf_last_update.get(symbol, now) > timedelta(minutes=5)):
             
             self.mtf_context[symbol] = self.mtf_analyzer.get_trend_context(symbol)
             self.mtf_last_update[symbol] = now
             
             # Выводим информацию о глобальном тренде
-            print(f"[{now}] 🌍 Глобальный тренд для {symbol}: {self.mtf_context[symbol]['description']}")
+            print(f"[{now}] 🌍 {symbol} MTF: {self.mtf_context[symbol]['description']} | Согласованность: {self.mtf_context[symbol]['alignment']}")
         
         # Получаем текущий контекст
-        context = self.mtf_context.get(symbol, {'trend': 'NEUTRAL', 'strength': 0})
+        context = self.mtf_context.get(symbol, {'trend': 'NEUTRAL', 'strength': 0, 'alignment': 'NEUTRAL'})
+        macro_signal = self.get_macro_signal()
         
         last = df.iloc[-1]
         adx = last['adx']
@@ -639,34 +806,52 @@ Reply with ONLY "YES" or "NO"."""
                 final_signal = trend_sig
                 final_strength = trend_strength
 
-        # Если есть сигнал, применяем корректировку на основе глобального тренда
+        # Если есть сигнал, применяем корректировку
         if final_signal:
             original_strength = final_strength
             
-            # Корректируем силу сигнала в зависимости от глобального тренда
+            # 1. Корректировка по глобальному тренду
             if context['trend'] == 'BULL' and final_signal == 'LONG':
-                # Лонг по тренду - усиливаем
                 boost = min(0.2, context['strength'] * 0.3)
                 final_strength = min(1.0, final_strength + boost)
                 print(f"📈 Лонг по бычьему тренду: +{boost:.2f} к силе")
                 
             elif context['trend'] == 'BEAR' and final_signal == 'SHORT':
-                # Шорт по тренду - усиливаем
                 boost = min(0.2, context['strength'] * 0.3)
                 final_strength = min(1.0, final_strength + boost)
                 print(f"📉 Шорт по медвежьему тренду: +{boost:.2f} к силе")
                 
             elif context['trend'] == 'BULL' and final_signal == 'SHORT':
-                # Шорт против бычьего тренда - ослабляем
                 penalty = min(0.3, context['strength'] * 0.4)
                 final_strength = max(0, final_strength - penalty)
                 print(f"⚠️ Шорт против бычьего тренда: -{penalty:.2f} к силе")
                 
             elif context['trend'] == 'BEAR' and final_signal == 'LONG':
-                # Лонг против медвежьего тренда - ослабляем
                 penalty = min(0.3, context['strength'] * 0.4)
                 final_strength = max(0, final_strength - penalty)
                 print(f"⚠️ Лонг против медвежьего тренда: -{penalty:.2f} к силе")
+            
+            # 2. Корректировка по согласованности ТФ
+            if context['alignment'] == 'STRONG_BULL' and final_signal == 'LONG':
+                final_strength = min(1.0, final_strength + 0.1)
+                print(f"💪 Сильная бычья согласованность: +0.1")
+            elif context['alignment'] == 'STRONG_BEAR' and final_signal == 'SHORT':
+                final_strength = min(1.0, final_strength + 0.1)
+                print(f"💪 Сильная медвежья согласованность: +0.1")
+            elif context['alignment'] == 'MIXED':
+                final_strength = max(0, final_strength - 0.05)
+                print(f"🔄 Разнонаправленные ТФ: -0.05")
+            
+            # 3. Корректировка по макроэкономике
+            if macro_signal == 'BULLISH' and final_signal == 'LONG':
+                final_strength = min(1.0, final_strength + 0.05)
+                print(f"📊 Бычий макрофон: +0.05")
+            elif macro_signal == 'BEARISH' and final_signal == 'SHORT':
+                final_strength = min(1.0, final_strength + 0.05)
+                print(f"📊 Медвежий макрофон: +0.05")
+            elif macro_signal == 'BEARISH' and final_signal == 'LONG':
+                final_strength = max(0, final_strength - 0.1)
+                print(f"⚠️ Лонг при медвежьем макрофоне: -0.1")
             
             if final_strength != original_strength:
                 print(f"🔄 Сила сигнала скорректирована: {original_strength:.2f} → {final_strength:.2f}")
@@ -697,13 +882,15 @@ Reply with ONLY "YES" or "NO"."""
         print(f"[{datetime.now(timezone.utc)}] Нет сильного сигнала (сила {final_strength:.2f}) для {symbol}")
         return None, None, None
 
-    def log_trade(self, symbol, side, entry, exit_price, size, pnl, pnl_pct, df_last):
+    def log_trade(self, symbol, side, entry, exit_price, size, pnl, pnl_pct, df_last, hold_time):
         timestamp = datetime.now(timezone.utc).isoformat()
+        hold_minutes = hold_time.total_seconds() / 60 if hold_time else 0
         row = [
             timestamp, symbol, side, entry, exit_price, size, pnl, pnl_pct,
             df_last['rsi'], df_last['adx'], df_last['vwap'], df_last['ema_20'], df_last['ema_50'],
             df_last['atr'], df_last['bb_upper'], df_last['bb_lower'],
-            df_last['stoch_k'], df_last['stoch_d'], df_last['macd_hist'], df_last.get('bid_ratio', 50)
+            df_last['stoch_k'], df_last['stoch_d'], df_last['macd_hist'], df_last.get('bid_ratio', 50),
+            round(hold_minutes, 1)
         ]
         with open(self.trade_log_file, 'a', newline='') as f:
             writer = csv.writer(f)
@@ -731,17 +918,38 @@ Reply with ONLY "YES" or "NO"."""
     def place_order(self, symbol, signal, params):
         try:
             balance = self.get_balance()
-            if balance <= 0:
-                print(f"[{datetime.now(timezone.utc)}] Нулевой баланс, пропускаем ордер")
+            
+            # Проверка минимального баланса
+            if balance < self.min_balance_for_trading:
+                print(f"[{datetime.now(timezone.utc)}] Баланс {balance:.2f} ниже минимального {self.min_balance_for_trading}")
+                self.send_telegram(f"⚠️ Баланс {balance:.2f} ниже минимального. Торговля приостановлена.")
                 return
+            
+            # Динамический риск в зависимости от баланса
+            if balance < 200:
+                risk_pct = 0.005  # 0.5% при малом балансе
+            else:
+                risk_pct = 0.01    # 1% при нормальном балансе
                 
-            risk = balance * 0.01  # 1% risk per trade
+            risk = balance * risk_pct
             size = risk / abs(params['entry'] - params['stop_loss'])
+            
+            # Минимальные размеры для Bybit
+            min_sizes = {
+                'BTC/USDT:USDT': 0.001,
+                'ETH/USDT:USDT': 0.01
+            }
             
             if symbol.startswith('BTC'):
                 size = round(size, 3)
+                if size < min_sizes[symbol]:
+                    print(f"Размер {size} меньше минимального {min_sizes[symbol]}, используем минимум")
+                    size = min_sizes[symbol]
             else:
                 size = round(size, 2)
+                if size < min_sizes[symbol]:
+                    print(f"Размер {size} меньше минимального {min_sizes[symbol]}, используем минимум")
+                    size = min_sizes[symbol]
 
             if size <= 0:
                 print(f"[{datetime.now(timezone.utc)}] Размер позиции слишком мал: {size}")
@@ -752,7 +960,8 @@ Reply with ONLY "YES" or "NO"."""
                 f"{signal} ({params['entry']:.2f})\n"
                 f"SL: {params['stop_loss']:.2f}\n"
                 f"TP: {params['take_profit']:.2f}\n"
-                f"Размер: {size}"
+                f"Размер: {size}\n"
+                f"Риск: {risk_pct*100:.1f}%"
             )
             self.send_telegram(msg)
 
@@ -770,7 +979,9 @@ Reply with ONLY "YES" or "NO"."""
                 'stop_loss': params['stop_loss'],
                 'take_profit': params['take_profit'],
                 'size': size,
-                'trailing_stop_activated': False
+                'open_time': datetime.now(timezone.utc),
+                'breakeven_activated': False,
+                'trailing_activated': False
             }
             print(f"[{datetime.now(timezone.utc)}] Order placed: {signal} {size} for {symbol}")
             self.send_telegram(f"✅ Ордер исполнен: {signal} {size} {symbol} по {actual_entry:.2f}")
@@ -789,24 +1000,62 @@ Reply with ONLY "YES" or "NO"."""
         entry = pos['entry']
         sl = pos['stop_loss']
         tp = pos['take_profit']
-
+        
+        # Проверка времени удержания
+        hold_time = datetime.now(timezone.utc) - pos['open_time']
+        
         if side == 'LONG':
             pnl_pct = ((curr - entry) / entry) * 100
         else:
             pnl_pct = ((entry - curr) / entry) * 100
-
+        
+        # 1. Временной стоп (если позиция висит слишком долго)
+        if hold_time > self.max_hold_time:
+            print(f"⏰ Время вышло! Позиция {symbol} держится {hold_time}")
+            
+            if pnl_pct > 0:
+                # Если в плюсе - закрываем
+                self.close_position(symbol, curr, 'Time Exit (Profit)', df, hold_time)
+            elif pnl_pct < -0.1:
+                # Если в небольшом минусе - тоже закрываем (лучше, чем SL)
+                self.close_position(symbol, curr, 'Time Exit (Stop)', df, hold_time)
+            else:
+                # Если около нуля - уменьшаем TP и ждем еще немного
+                pos['take_profit'] = entry * (1 + (tp/entry - 1) * 0.7)
+                print(f"🎯 TP уменьшен из-за времени: {pos['take_profit']:.2f}")
+            return
+        
+        # 2. Динамический трейлинг-стоп
+        if pnl_pct > self.min_profit_for_breakeven and not pos.get('breakeven_activated'):
+            pos['stop_loss'] = entry  # Безубыток
+            pos['breakeven_activated'] = True
+            self.send_telegram(f'🔒 {symbol} в безубытке')
+        
+        if pnl_pct > self.trailing_activation and not pos.get('trailing_activated'):
+            pos['trailing_activated'] = True
+            self.send_telegram(f'🔝 {symbol} трейлинг активирован')
+        
+        if pos.get('trailing_activated'):
+            if side == 'LONG':
+                new_sl = curr * (1 - self.trailing_distance / 100)
+                if new_sl > pos['stop_loss']:
+                    pos['stop_loss'] = new_sl
+                    print(f"🔝 Трейлинг стоп поднят до {new_sl:.2f}")
+            else:
+                new_sl = curr * (1 + self.trailing_distance / 100)
+                if new_sl < pos['stop_loss']:
+                    pos['stop_loss'] = new_sl
+                    print(f"🔝 Трейлинг стоп опущен до {new_sl:.2f}")
+        
+        # 3. Стандартные проверки SL/TP
         if (side == 'LONG' and curr <= sl) or (side == 'SHORT' and curr >= sl):
-            self.close_position(symbol, curr, 'SL Hit', df)
+            self.close_position(symbol, curr, 'SL Hit', df, hold_time)
         elif (side == 'LONG' and curr >= tp) or (side == 'SHORT' and curr <= tp):
-            self.close_position(symbol, curr, 'TP Hit', df)
-        elif pnl_pct > self.trailing_stop_percent and not pos['trailing_stop_activated']:
-            pos['stop_loss'] = entry
-            pos['trailing_stop_activated'] = True
-            self.send_telegram(f'🔒 Trailing: {symbol} to Breakeven')
+            self.close_position(symbol, curr, 'TP Hit', df, hold_time)
 
-        print(f"[{datetime.now(timezone.utc)}] Position checked for {symbol}, PNL %: {pnl_pct:.2f}")
+        print(f"[{datetime.now(timezone.utc)}] Position checked for {symbol}, PNL %: {pnl_pct:.2f}, hold time: {hold_time}")
 
-    def close_position(self, symbol, price, reason, df):
+    def close_position(self, symbol, price, reason, df, hold_time):
         pos = self.positions.get(symbol)
         if not pos:
             return
@@ -819,7 +1068,7 @@ Reply with ONLY "YES" or "NO"."""
             pnl_pct = ((pos['entry'] - price) / pos['entry']) * 100
 
         # Логируем сделку
-        self.log_trade(symbol, pos['side'], pos['entry'], price, pos['size'], pnl, pnl_pct, df.iloc[-1])
+        self.log_trade(symbol, pos['side'], pos['entry'], price, pos['size'], pnl, pnl_pct, df.iloc[-1], hold_time)
 
         try:
             if pos['side'] == 'LONG':
@@ -830,6 +1079,7 @@ Reply with ONLY "YES" or "NO"."""
             msg = (
                 f"🔴 *Закрыта {symbol}*\n"
                 f"Причина: {reason}\n"
+                f"Время удержания: {hold_time}\n"
                 f"P&L: ${pnl:.2f} ({pnl_pct:.2f}%)"
             )
             self.send_telegram(msg)
@@ -845,6 +1095,10 @@ Reply with ONLY "YES" or "NO"."""
             print(f"[{datetime.now(timezone.utc)}] Starting new cycle")
             self.check_daily_loss_limit()
             self.get_balance()
+            
+            # Обновляем макроэкономику (раз в день)
+            self.update_macro_context()
+            
             for symbol in self.symbols:
                 try:
                     df = self.fetch_ohlcv(symbol)
