@@ -190,17 +190,126 @@ class FREDAnalyzer:
             return None
 
 
+class TradingSessions:
+    """Анализ торговых сессий и их влияния на волатильность"""
+    
+    # Временные зоны (UTC)
+    SESSIONS = {
+        'asia': {
+            'name': '🇯🇵 Азиатская',
+            'start': 0,    # 00:00 UTC
+            'end': 8,      # 08:00 UTC
+            'volatility': 'medium',
+            'description': 'Спокойное время, флэт/накопление',
+            'strategy': 'range',
+            'color': '🟡'
+        },
+        'london': {
+            'name': '🇬🇧 Лондонская',
+            'start': 8,     # 08:00 UTC
+            'end': 16,      # 16:00 UTC
+            'volatility': 'high',
+            'description': 'Начало движения, первые тренды',
+            'strategy': 'trend',
+            'color': '🔵'
+        },
+        'ny': {
+            'name': '🇺🇸 Нью-Йоркская',
+            'start': 13,    # 13:00 UTC
+            'end': 21,      # 21:00 UTC
+            'volatility': 'very_high',
+            'description': 'Активная торговля, сильные движения',
+            'strategy': 'breakout',
+            'color': '🔴'
+        },
+        'london_ny_overlap': {
+            'name': '🇬🇧🇺🇸 Перекрытие',
+            'start': 13,    # 13:00 UTC
+            'end': 16,      # 16:00 UTC
+            'volatility': 'extreme',
+            'description': 'Пик активности, лучшие движения',
+            'strategy': 'momentum',
+            'color': '⚡'
+        },
+        'weekend': {
+            'name': '😴 Выходные',
+            'volatility': 'low',
+            'description': 'Низкая ликвидность, осторожно',
+            'strategy': 'rest',
+            'color': '💤'
+        }
+    }
+    
+    @staticmethod
+    def get_current_session():
+        """Определяет текущую торговую сессию"""
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+        weekday = now.weekday()
+        
+        # Выходные
+        if weekday >= 5:  # Суббота (5) или Воскресенье (6)
+            return 'weekend', TradingSessions.SESSIONS['weekend']
+        
+        # Перекрытие Лондон-Нью-Йорк (приоритет)
+        if 13 <= hour < 16:
+            return 'london_ny_overlap', TradingSessions.SESSIONS['london_ny_overlap']
+        # Нью-Йорк
+        elif 13 <= hour < 21:
+            return 'ny', TradingSessions.SESSIONS['ny']
+        # Лондон
+        elif 8 <= hour < 16:
+            return 'london', TradingSessions.SESSIONS['london']
+        # Азия (включая поздний вечер)
+        else:
+            return 'asia', TradingSessions.SESSIONS['asia']
+    
+    @staticmethod
+    def get_session_info():
+        """Возвращает полную информацию о текущей сессии"""
+        session_key, session = TradingSessions.get_current_session()
+        
+        now = datetime.now(timezone.utc)
+        hour = now.hour
+        minute = now.minute
+        
+        # Для неперекрывающихся сессий добавляем время до конца
+        if session_key not in ['london_ny_overlap', 'weekend']:
+            end_hour = session['end']
+            if end_hour <= hour:
+                end_hour += 24
+            
+            minutes_left = (end_hour - hour) * 60 - minute
+            hours_left = minutes_left // 60
+            mins_left = minutes_left % 60
+            
+            time_left = f"{hours_left}ч {mins_left}м" if hours_left > 0 else f"{mins_left}м"
+        else:
+            time_left = "переменная"
+        
+        return {
+            'key': session_key,
+            'name': session['name'],
+            'volatility': session['volatility'],
+            'description': session['description'],
+            'strategy': session['strategy'],
+            'color': session['color'],
+            'time_left': time_left,
+            'hour_utc': hour
+        }
+
+
 class MultiTimeframeAnalyzer:
     """Анализирует все таймфреймы от 15m до 1d"""
     
     def __init__(self, exchange):
         self.exchange = exchange
         self.timeframes = {
-            '15m': {'weight': 0.15, 'name': '15-минутный', 'cache_ttl': 5},    # Кэш 5 мин
-            '30m': {'weight': 0.20, 'name': '30-минутный', 'cache_ttl': 10},   # Кэш 10 мин
-            '1h': {'weight': 0.25, 'name': 'Часовой', 'cache_ttl': 15},         # Кэш 15 мин
-            '4h': {'weight': 0.25, 'name': '4-часовой', 'cache_ttl': 60},       # Кэш 1 час
-            '1d': {'weight': 0.15, 'name': 'Дневной', 'cache_ttl': 240},        # Кэш 4 часа
+            '15m': {'weight': 0.15, 'name': '15-минутный', 'cache_ttl': 5},
+            '30m': {'weight': 0.20, 'name': '30-минутный', 'cache_ttl': 10},
+            '1h': {'weight': 0.25, 'name': 'Часовой', 'cache_ttl': 15},
+            '4h': {'weight': 0.25, 'name': '4-часовой', 'cache_ttl': 60},
+            '1d': {'weight': 0.15, 'name': 'Дневной', 'cache_ttl': 240},
         }
         self.cache = {}
         
@@ -242,7 +351,6 @@ class MultiTimeframeAnalyzer:
             avg_score = total_score / total_weight
             context['score'] = avg_score
             
-            # Определяем общий тренд
             if avg_score > 0.2:
                 context['trend'] = 'BULL'
                 context['strength'] = avg_score
@@ -253,12 +361,17 @@ class MultiTimeframeAnalyzer:
                 context['description'] = f"⬇️ Медвежий тренд (сила {abs(avg_score):.2f})"
             
             # Проверяем согласованность ТФ
-            if all(d == 'BULL' for d in directions if d != 'NEUTRAL'):
+            bull_count = sum(1 for d in directions if d == 'BULL')
+            bear_count = sum(1 for d in directions if d == 'BEAR')
+            
+            if bull_count >= 4:
                 context['alignment'] = 'STRONG_BULL'
-            elif all(d == 'BEAR' for d in directions if d != 'NEUTRAL'):
+            elif bear_count >= 4:
                 context['alignment'] = 'STRONG_BEAR'
-            elif len(set(directions)) == 1:
-                context['alignment'] = 'CONSISTENT'
+            elif bull_count >= 3:
+                context['alignment'] = 'BULL'
+            elif bear_count >= 3:
+                context['alignment'] = 'BEAR'
             else:
                 context['alignment'] = 'MIXED'
         
@@ -293,18 +406,15 @@ class MultiTimeframeAnalyzer:
     
     def _analyze_timeframe(self, df):
         """
-        Анализирует один таймфрейм и возвращает:
-        - направление тренда (BULL/BEAR/NEUTRAL)
-        - силу тренда (-1 до 1)
-        - описание
+        Анализирует один таймфрейм
         """
         last = df.iloc[-1]
-        prev = df.iloc[-5]  # 5 свечей назад
+        prev = df.iloc[-5]
         
         score = 0
         reasons = []
         
-        # 1. EMA alignment
+        # EMA alignment
         if last['ema_20'] > last['ema_50']:
             score += 0.4
             reasons.append("EMA20 > EMA50")
@@ -312,7 +422,7 @@ class MultiTimeframeAnalyzer:
             score -= 0.4
             reasons.append("EMA20 < EMA50")
         
-        # 2. Цена относительно EMA20
+        # Цена относительно EMA20
         if last['close'] > last['ema_20']:
             score += 0.3
             reasons.append("Цена выше EMA20")
@@ -320,7 +430,7 @@ class MultiTimeframeAnalyzer:
             score -= 0.3
             reasons.append("Цена ниже EMA20")
         
-        # 3. RSI направление
+        # RSI направление
         if last['rsi'] > 50:
             score += 0.2
             reasons.append(f"RSI {last['rsi']:.1f} > 50")
@@ -328,7 +438,7 @@ class MultiTimeframeAnalyzer:
             score -= 0.2
             reasons.append(f"RSI {last['rsi']:.1f} < 50")
         
-        # 4. Моментум (сравнение с 5 свечей назад)
+        # Моментум
         if last['close'] > prev['close']:
             score += 0.1
             reasons.append("Цена растет")
@@ -336,13 +446,12 @@ class MultiTimeframeAnalyzer:
             score -= 0.1
             reasons.append("Цена падает")
         
-        # Определяем направление
         if score > 0.3:
             trend = 'BULL'
-            desc = f"⬆️ Бычий ({', '.join(reasons[:2])})"
+            desc = f"⬆️ Бычий"
         elif score < -0.3:
             trend = 'BEAR'
-            desc = f"⬇️ Медвежий ({', '.join(reasons[:2])})"
+            desc = f"⬇️ Медвежий"
         else:
             trend = 'NEUTRAL'
             desc = f"↔️ Нейтральный"
@@ -350,9 +459,117 @@ class MultiTimeframeAnalyzer:
         return trend, score, desc
 
 
+class GlobalLevels:
+    """Анализ глобальных уровней Open/Close"""
+    
+    def __init__(self, exchange):
+        self.exchange = exchange
+        self.cache = {}
+        
+    def get_daily_levels(self, symbol):
+        """Получает уровни открытия/закрытия дня"""
+        cache_key = f"{symbol}_daily"
+        now = datetime.now(timezone.utc)
+        
+        if cache_key in self.cache:
+            data, time = self.cache[cache_key]
+            if now - time < timedelta(hours=1):
+                return data
+        
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, '1d', limit=5)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            
+            today = df.iloc[-1]
+            yesterday = df.iloc[-2] if len(df) > 1 else None
+            
+            levels = {
+                'today_open': today['open'],
+                'today_high': today['high'],
+                'today_low': today['low'],
+                'today_close': today['close'],
+                'yesterday_close': yesterday['close'] if yesterday else None,
+                'position': self._get_position(today['close'], today['open'], today['high'], today['low'])
+            }
+            
+            levels['psychological'] = self._get_psychological_levels(today['close'])
+            
+            self.cache[cache_key] = (levels, now)
+            return levels
+            
+        except Exception as e:
+            return None
+    
+    def _get_position(self, price, open_, high, low):
+        """Определяет позицию цены относительно диапазона дня"""
+        range_size = high - low
+        if range_size == 0:
+            return 'MIDDLE'
+        
+        position = ((price - low) / range_size) * 100
+        
+        if position < 25:
+            return 'LOW'
+        elif position < 50:
+            return 'LOWER_MID'
+        elif position < 75:
+            return 'UPPER_MID'
+        else:
+            return 'HIGH'
+    
+    def _get_psychological_levels(self, price):
+        """Психологические уровни (круглые числа)"""
+        levels = []
+        
+        if price > 1000:  # BTC
+            base = round(price / 1000) * 1000
+            for i in [-2, -1, 0, 1, 2]:
+                levels.append(base + i * 1000)
+        
+        if price > 100:  # ETH
+            base = round(price / 100) * 100
+            for i in [-2, -1, 0, 1, 2]:
+                levels.append(base + i * 100)
+        
+        return sorted(levels)
+    
+    def get_signal_from_levels(self, price, levels, side):
+        """Генерирует сигнал на основе глобальных уровней"""
+        if not levels:
+            return 0
+        
+        boost = 0
+        
+        # Цена около дневного открытия
+        if abs(price - levels['today_open']) / levels['today_open'] < 0.002:
+            if side == 'LONG' and price > levels['today_open']:
+                boost += 0.1
+            elif side == 'SHORT' and price < levels['today_open']:
+                boost += 0.1
+        
+        # Цена на экстремумах дня
+        if price >= levels['today_high'] * 0.998:
+            if side == 'SHORT':
+                boost += 0.15
+        elif price <= levels['today_low'] * 1.002:
+            if side == 'LONG':
+                boost += 0.15
+        
+        # Психологические уровни
+        for psych_level in levels.get('psychological', []):
+            if abs(price - psych_level) / psych_level < 0.001:
+                if side == 'LONG' and price > psych_level:
+                    boost += 0.2
+                elif side == 'SHORT' and price < psych_level:
+                    boost += 0.2
+                break
+        
+        return min(boost, 0.5)
+
+
 class BybitScalpingBot:
     def __init__(self):
-        # API keys from environment
+        # API keys
         self.api_key = os.getenv('BYBIT_API_KEY')
         self.api_secret = os.getenv('BYBIT_API_SECRET')
         self.telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
@@ -398,12 +615,12 @@ class BybitScalpingBot:
         self.trailing_stop_percent = 0.5
         self.taker_fee = 0.0006
 
-        # Новые параметры управления позициями
-        self.max_hold_time = timedelta(hours=2)      # Максимальное время удержания
-        self.min_profit_for_breakeven = 0.3          # % при котором передвигаем SL в безубыток
-        self.trailing_activation = 0.5                # % для активации трейлинга
-        self.trailing_distance = 0.3                   # % отступа трейлинга
-        self.min_balance_for_trading = 50              # Минимальный баланс для торговли
+        # Управление позициями
+        self.max_hold_time = timedelta(hours=2)
+        self.min_profit_for_breakeven = 0.3
+        self.trailing_activation = 0.5
+        self.trailing_distance = 0.3
+        self.min_balance_for_trading = 50
 
         # Daily loss limit
         self.daily_loss_limit_pct = -4.2
@@ -411,7 +628,7 @@ class BybitScalpingBot:
         self.day_start_equity = None
         self.trading_paused_until = None
 
-        # CSV для лога сделок
+        # CSV лог
         self.trade_log_file = "trade_log.csv"
         if not os.path.exists(self.trade_log_file):
             with open(self.trade_log_file, 'w', newline='') as f:
@@ -419,18 +636,26 @@ class BybitScalpingBot:
                 writer.writerow([
                     'timestamp', 'symbol', 'side', 'entry', 'exit', 'size', 'pnl', 'pnl_pct',
                     'rsi', 'adx', 'vwap', 'ema_20', 'ema_50', 'atr', 'bb_upper', 'bb_lower',
-                    'stoch_k', 'stoch_d', 'macd_hist', 'bid_ratio', 'hold_time_minutes'
+                    'stoch_k', 'stoch_d', 'macd_hist', 'bid_ratio', 'hold_time_minutes',
+                    'session', 'global_level_boost'
                 ])
 
-        # Мультитаймфреймовый анализатор
+        # Анализаторы
         self.mtf_analyzer = MultiTimeframeAnalyzer(self.exchange)
         self.mtf_context = {}
         self.mtf_last_update = {}
 
-        # FRED анализатор
         self.fred = FREDAnalyzer(self.fred_api_key)
         self.macro_context = {}
         self.macro_last_update = None
+
+        self.global_levels = GlobalLevels(self.exchange)
+        self.levels_cache = {}
+
+        # Параметры для сессий
+        self.session_trades = {}
+        self.current_session = None
+        self.last_session_message = None
 
         print(f"[{datetime.now(timezone.utc)}] Bot initialized for {self.symbols}")
         self.send_telegram(f"Bot started\nSymbols: {' '.join(self.symbols)}\nTimeframe: {self.timeframe}")
@@ -440,6 +665,37 @@ class BybitScalpingBot:
             self.bot.send_message(self.telegram_chat_id, message, parse_mode='Markdown')
         except Exception as e:
             print(f"Telegram error: {e}")
+
+    def get_session_info(self):
+        """Возвращает информацию о текущей торговой сессии"""
+        return TradingSessions.get_session_info()
+
+    def update_session(self):
+        """Обновляет информацию о сессии и отправляет уведомление при смене"""
+        session_info = self.get_session_info()
+        
+        if self.current_session != session_info['key']:
+            self.current_session = session_info['key']
+            
+            # Сбрасываем счетчик сделок для новой сессии
+            self.session_trades = {self.current_session: 0}
+            
+            # Отправляем уведомление (не чаще раза в час)
+            now = datetime.now(timezone.utc)
+            if not self.last_session_message or now - self.last_session_message > timedelta(minutes=30):
+                msg = (
+                    f"{session_info['color']} *Новая сессия*\n"
+                    f"{session_info['name']}\n"
+                    f"Волатильность: {session_info['volatility']}\n"
+                    f"Стратегия: {session_info['strategy']}\n"
+                    f"Описание: {session_info['description']}"
+                )
+                self.send_telegram(msg)
+                self.last_session_message = now
+            
+            print(f"[{now}] 🕐 Сессия: {session_info['name']} | {session_info['description']}")
+        
+        return session_info
 
     def fetch_ohlcv(self, symbol, limit=1000):
         try:
@@ -460,7 +716,6 @@ class BybitScalpingBot:
             bid_ratio = (total_bids / total) * 100 if total > 0 else 50
             return {'bid_ratio': bid_ratio, 'total_volume': total}
         except Exception as e:
-            print(f"Error fetching orderbook for {symbol}: {e}")
             return {'bid_ratio': 50, 'total_volume': 0}
 
     def fetch_coinglass_data(self, symbol_base):
@@ -472,11 +727,9 @@ class BybitScalpingBot:
             res = requests.get(url, headers=headers, timeout=10).json()
             return res.get('data', [])[0] if res.get('success') else {}
         except Exception as e:
-            print(f"Coinglass error: {e}")
             return {}
 
     def fetch_cryptopanic_news(self):
-        """Запрашивает новости с кэшированием на 1 час"""
         if not self.cryptopanic_api_key:
             return []
 
@@ -484,7 +737,6 @@ class BybitScalpingBot:
         
         if self.cryptopanic_cache and self.cryptopanic_cache_time:
             if now - self.cryptopanic_cache_time < self.cryptopanic_cache_duration:
-                print(f"[{now}] CryptoPanic: используем кэшированные новости")
                 return self.cryptopanic_cache
 
         try:
@@ -492,25 +744,20 @@ class BybitScalpingBot:
             res = requests.get(url, timeout=10)
             
             if res.status_code == 429:
-                print(f"[{now}] CryptoPanic: rate limit (429), возвращаем кэш")
                 return self.cryptopanic_cache if self.cryptopanic_cache else []
             
             if res.status_code != 200:
-                print(f"[{now}] CryptoPanic: HTTP error {res.status_code}")
                 return self.cryptopanic_cache if self.cryptopanic_cache else []
             
             data = res.json()
             self.cryptopanic_cache = data.get('results', [])[:5]
             self.cryptopanic_cache_time = now
-            print(f"[{now}] CryptoPanic: загружено {len(self.cryptopanic_cache)} новостей")
             return self.cryptopanic_cache
             
         except Exception as e:
-            print(f"[{now}] CryptoPanic error: {e}")
             return self.cryptopanic_cache if self.cryptopanic_cache else []
 
     def update_macro_context(self):
-        """Обновляет макроэкономический контекст (раз в день)"""
         now = datetime.now(timezone.utc)
         
         if self.macro_last_update and now - self.macro_last_update < timedelta(days=1):
@@ -534,14 +781,12 @@ class BybitScalpingBot:
         return self.macro_context
 
     def get_macro_signal(self):
-        """Возвращает макроэкономический сигнал для трейдинга"""
         if not self.macro_context:
             return 'NEUTRAL'
         
         inflation = self.macro_context.get('inflation', {})
         rates = self.macro_context.get('rates', {})
         
-        # Комбинируем сигналы
         if inflation.get('signal') == 'BEARISH' and rates.get('environment') == 'HIGH_RATE':
             return 'BEARISH'
         elif inflation.get('signal') == 'BULLISH' and rates.get('environment') == 'LOW_RATE':
@@ -550,63 +795,37 @@ class BybitScalpingBot:
             return 'NEUTRAL'
 
     def get_ai_filter(self, symbol, df, signal, orderbook, coinglass, news):
-        """Смягченный AI фильтр с подробным промптом"""
         if not self.deepseek_api_key:
             return True
         try:
             last = df.iloc[-1]
             news_text = "\n".join(n.get('title', '') for n in news[:3])
             
-            # Добавляем макроэкономический контекст
             macro = self.get_macro_signal()
+            session = self.get_session_info()
             
-            # Определяем состояние рынка для промпта
             rsi_state = 'oversold' if last['rsi'] < 30 else 'overbought' if last['rsi'] > 70 else 'neutral'
             adx_state = 'trending' if last['adx'] > 25 else 'ranging'
-            vwap_state = 'above' if last['close'] > last['vwap'] else 'below'
-            ema_state = 'BULLISH' if last['ema_20'] > last['ema_50'] else 'BEARISH'
-            
-            # Определяем позицию относительно Bollinger
-            if last['close'] >= last['bb_upper']:
-                bb_state = 'UPPER (overbought)'
-            elif last['close'] <= last['bb_lower']:
-                bb_state = 'LOWER (oversold)'
-            else:
-                bb_state = 'MIDDLE'
-            
-            # Определяем доминирование в стакане
-            order_flow = 'buyers' if orderbook['bid_ratio'] > 50 else 'sellers'
             
             prompt = f"""Analyze this {signal} scalp trade for {symbol}:
 
 Price: ${last['close']:.2f}
+Session: {session['name']} ({session['description']})
 
-TECHNICAL ANALYSIS:
+TECHNICALS:
 • RSI: {last['rsi']:.1f} ({rsi_state})
 • ADX: {last['adx']:.1f} ({adx_state})
-• VWAP: price {vwap_state} VWAP (${last['vwap']:.2f})
-• EMA20/50: {ema_state} (20: ${last['ema_20']:.2f}, 50: ${last['ema_50']:.2f})
-• Bollinger: price at {bb_state} (upper: ${last['bb_upper']:.2f}, lower: ${last['bb_lower']:.2f})
-• ATR: ${last['atr']:.2f} (volatility measure)
+• VWAP: {'above' if last['close']>last['vwap'] else 'below'} (${last['vwap']:.2f})
+• EMA20/50: {'BULLISH' if last['ema_20']>last['ema_50'] else 'BEARISH'}
 
 ORDER FLOW:
-• Bid/Ask Ratio: {orderbook['bid_ratio']:.1f}% ({order_flow} dominate)
+• Bid Ratio: {orderbook['bid_ratio']:.1f}%
 
-MARKET SENTIMENT:
-• Coinglass L/S: {coinglass.get('longShortRatio', 'N/A')}
-• Macro Outlook: {macro}
-• News: {news_text[:150]}...
+SENTIMENT:
+• Macro: {macro}
+• News: {news_text[:100]}...
 
-SCALP TRADING CONTEXT:
-- Target: 0.5-1% profit
-- Stop loss: tight (1.2x ATR)
-- Holding time: minutes to hours
-- We don't need perfect setups, just decent probability
-
-QUESTION: Based on ALL available data, would you take this {signal} scalp trade?
-Reply with ONLY "YES" or "NO"."""
-            
-            print(f"[{datetime.now(timezone.utc)}] 🤔 Asking DeepSeek about {symbol} {signal}...")
+Take this trade? Reply ONLY "YES" or "NO"."""
             
             res = requests.post(
                 'https://api.deepseek.com/v1/chat/completions',
@@ -624,20 +843,11 @@ Reply with ONLY "YES" or "NO"."""
             ).json()
             
             answer = res['choices'][0]['message']['content'].strip().upper()
-            print(f"[{datetime.now(timezone.utc)}] 🤖 DeepSeek verdict: {answer}")
-            
-            # Проверяем наличие положительного ответа
-            positive = any(word in answer for word in ['YES', 'SURE', 'GOOD', 'OK', 'TAKE', 'YEP'])
-            
-            if positive:
-                print(f"✅ DeepSeek APPROVED {symbol} {signal}")
-            else:
-                print(f"❌ DeepSeek REJECTED {symbol} {signal}")
+            positive = any(word in answer for word in ['YES', 'SURE', 'GOOD', 'OK', 'TAKE'])
             
             return positive
             
         except Exception as e:
-            print(f"[{datetime.now(timezone.utc)}] ⚠️ AI error: {e}")
             return True
 
     def calculate_indicators(self, df):
@@ -648,12 +858,11 @@ Reply with ONLY "YES" or "NO"."""
         df['atr'] = TechnicalIndicators.atr(df['high'], df['low'], df['close'], period=14)
         bb_upper, bb_middle, bb_lower = TechnicalIndicators.bollinger_bands(df['close'], period=20, std=2)
         df['bb_upper'] = bb_upper
-        df['bb_middle'] = bb_middle
         df['bb_lower'] = bb_lower
-        adx, di_plus, di_minus = TechnicalIndicators.adx(df['high'], df['low'], df['close'], period=14)
+        adx, _, _ = TechnicalIndicators.adx(df['high'], df['low'], df['close'], period=14)
         df['adx'] = adx
         df['stoch_k'], df['stoch_d'] = TechnicalIndicators.stochastic(df['high'], df['low'], df['close'])
-        df['macd'], df['macd_signal'], df['macd_hist'] = TechnicalIndicators.macd(df['close'])
+        df['macd'], _, df['macd_hist'] = TechnicalIndicators.macd(df['close'])
         return df
 
     def check_daily_loss_limit(self):
@@ -663,7 +872,6 @@ Reply with ONLY "YES" or "NO"."""
         if self.last_day != current_day:
             try:
                 bal = self.exchange.fetch_balance()
-                # Улучшенный парсинг баланса с fallback
                 if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
                     equity = float(bal['info']['result']['list'][0]['totalEquity'])
                 else:
@@ -673,13 +881,10 @@ Reply with ONLY "YES" or "NO"."""
                 self.last_day = current_day
                 self.trading_paused_until = None
                 print(f"[{now}] Новый день UTC. Депозит на начало: {equity:.2f} USDT")
-                self.send_telegram(f"Новый день UTC. Баланс на старте: {equity:.2f} USDT")
             except Exception as e:
-                print(f"Не удалось получить equity для лимита: {e}")
                 return True
 
         if self.trading_paused_until and now < self.trading_paused_until:
-            print(f"[{now}] Торговля остановлена до {self.trading_paused_until} из-за лимита убытков")
             return False
 
         if self.day_start_equity is None:
@@ -693,17 +898,15 @@ Reply with ONLY "YES" or "NO"."""
                 current_equity = float(bal['USDT']['total']) if 'USDT' in bal and 'total' in bal['USDT'] else 100.0
                 
             pnl_pct = (current_equity - self.day_start_equity) / self.day_start_equity * 100
-            print(f"[{now}] Текущий PnL дня: {pnl_pct:.2f}% (начало: {self.day_start_equity:.2f}, сейчас: {current_equity:.2f})")
 
             if pnl_pct <= self.daily_loss_limit_pct:
                 self.trading_paused_until = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-                msg = f"🚨 Дневной лимит убытков -{self.daily_loss_limit_pct}% достигнут! Торговля остановлена до {self.trading_paused_until.strftime('%Y-%m-%d %H:%M UTC')}"
+                msg = f"🚨 Дневной лимит убытков -{self.daily_loss_limit_pct}% достигнут! Пауза до {self.trading_paused_until.strftime('%Y-%m-%d %H:%M UTC')}"
                 print(msg)
                 self.send_telegram(msg)
                 return False
             return True
         except Exception as e:
-            print(f"Ошибка проверки лимита: {e}")
             return True
 
     def sideways_strategy(self, df, ob):
@@ -711,19 +914,16 @@ Reply with ONLY "YES" or "NO"."""
         price = last['close']
         rsi = last['rsi']
         stoch_k = last['stoch_k']
-        macd_hist = last['macd_hist']
         bb_lower = last['bb_lower']
         bb_upper = last['bb_upper']
         bid_ratio = ob['bid_ratio']
 
-        # LONG сигнал
         if price <= bb_lower and rsi < 35 and stoch_k < 20 and bid_ratio > 55:
             strength = 0.9 if rsi < 30 and stoch_k < 15 and bid_ratio > 65 else 0.6
             return 'LONG', strength
         
-        # SHORT сигнал
-        if price >= bb_upper and rsi > 65 and macd_hist > 0 and bid_ratio < 45:
-            strength = 0.9 if rsi > 70 and macd_hist > 0.5 and bid_ratio < 35 else 0.6
+        if price >= bb_upper and rsi > 65 and bid_ratio < 45:
+            strength = 0.9 if rsi > 70 and bid_ratio < 35 else 0.6
             return 'SHORT', strength
         
         return None, 0
@@ -737,12 +937,10 @@ Reply with ONLY "YES" or "NO"."""
         rsi = last['rsi']
         bid_ratio = ob['bid_ratio']
 
-        # LONG сигнал
         if price > vwap and ema20 > ema50 and rsi > 35 and bid_ratio > 55:
             strength = 0.9 if rsi > 45 and bid_ratio > 65 else 0.6
             return 'LONG', strength
         
-        # SHORT сигнал  
         if price < vwap and ema20 < ema50 and rsi < 65 and bid_ratio < 45:
             strength = 0.9 if rsi < 55 and bid_ratio < 35 else 0.6
             return 'SHORT', strength
@@ -753,10 +951,13 @@ Reply with ONLY "YES" or "NO"."""
         if not self.check_daily_loss_limit():
             return None, None, None
 
-        # Обновляем макроэкономические данные (раз в день)
+        # Обновляем сессию
+        session_info = self.update_session()
+        
+        # Обновляем макроэкономику
         self.update_macro_context()
         
-        # Обновляем контекст старших ТФ (не чаще чем раз в 5 минут)
+        # Обновляем MTF контекст
         now = datetime.now(timezone.utc)
         if (symbol not in self.mtf_last_update or 
             now - self.mtf_last_update.get(symbol, now) > timedelta(minutes=5)):
@@ -764,18 +965,18 @@ Reply with ONLY "YES" or "NO"."""
             self.mtf_context[symbol] = self.mtf_analyzer.get_trend_context(symbol)
             self.mtf_last_update[symbol] = now
             
-            # Выводим информацию о глобальном тренде
             print(f"[{now}] 🌍 {symbol} MTF: {self.mtf_context[symbol]['description']} | Согласованность: {self.mtf_context[symbol]['alignment']}")
         
-        # Получаем текущий контекст
         context = self.mtf_context.get(symbol, {'trend': 'NEUTRAL', 'strength': 0, 'alignment': 'NEUTRAL'})
         macro_signal = self.get_macro_signal()
+        
+        # Получаем глобальные уровни
+        daily_levels = self.global_levels.get_daily_levels(symbol)
         
         last = df.iloc[-1]
         adx = last['adx']
         ob = self.fetch_orderbook_data(symbol)
 
-        # Добавляем bid_ratio в last для лога
         last['bid_ratio'] = ob['bid_ratio']
 
         side_sig, side_strength = self.sideways_strategy(df, ob)
@@ -783,6 +984,7 @@ Reply with ONLY "YES" or "NO"."""
 
         final_signal = None
         final_strength = 0
+        level_boost = 0
 
         if adx < 25:
             if side_sig:
@@ -806,69 +1008,48 @@ Reply with ONLY "YES" or "NO"."""
                 final_signal = trend_sig
                 final_strength = trend_strength
 
-        # Если есть сигнал, применяем корректировку
         if final_signal:
             original_strength = final_strength
             
-            # 1. Корректировка по глобальному тренду
+            # 1. Коррекция по MTF тренду
             if context['trend'] == 'BULL' and final_signal == 'LONG':
                 boost = min(0.2, context['strength'] * 0.3)
                 final_strength = min(1.0, final_strength + boost)
-                print(f"📈 Лонг по бычьему тренду: +{boost:.2f} к силе")
-                
             elif context['trend'] == 'BEAR' and final_signal == 'SHORT':
                 boost = min(0.2, context['strength'] * 0.3)
                 final_strength = min(1.0, final_strength + boost)
-                print(f"📉 Шорт по медвежьему тренду: +{boost:.2f} к силе")
-                
             elif context['trend'] == 'BULL' and final_signal == 'SHORT':
                 penalty = min(0.3, context['strength'] * 0.4)
                 final_strength = max(0, final_strength - penalty)
-                print(f"⚠️ Шорт против бычьего тренда: -{penalty:.2f} к силе")
-                
             elif context['trend'] == 'BEAR' and final_signal == 'LONG':
                 penalty = min(0.3, context['strength'] * 0.4)
                 final_strength = max(0, final_strength - penalty)
-                print(f"⚠️ Лонг против медвежьего тренда: -{penalty:.2f} к силе")
             
-            # 2. Корректировка по согласованности ТФ
-            if context['alignment'] == 'STRONG_BULL' and final_signal == 'LONG':
-                final_strength = min(1.0, final_strength + 0.1)
-                print(f"💪 Сильная бычья согласованность: +0.1")
-            elif context['alignment'] == 'STRONG_BEAR' and final_signal == 'SHORT':
-                final_strength = min(1.0, final_strength + 0.1)
-                print(f"💪 Сильная медвежья согласованность: +0.1")
-            elif context['alignment'] == 'MIXED':
-                final_strength = max(0, final_strength - 0.05)
-                print(f"🔄 Разнонаправленные ТФ: -0.05")
+            # 2. Коррекция по глобальным уровням
+            level_boost = self.global_levels.get_signal_from_levels(
+                last['close'], daily_levels, final_signal
+            )
+            if level_boost > 0:
+                final_strength = min(1.0, final_strength + level_boost)
             
-            # 3. Корректировка по макроэкономике
-            if macro_signal == 'BULLISH' and final_signal == 'LONG':
-                final_strength = min(1.0, final_strength + 0.05)
-                print(f"📊 Бычий макрофон: +0.05")
-            elif macro_signal == 'BEARISH' and final_signal == 'SHORT':
-                final_strength = min(1.0, final_strength + 0.05)
-                print(f"📊 Медвежий макрофон: +0.05")
-            elif macro_signal == 'BEARISH' and final_signal == 'LONG':
+            # 3. Коррекция по сессии
+            if session_info['volatility'] in ['very_high', 'extreme']:
+                final_strength = min(1.0, final_strength + 0.1)
+            elif session_info['volatility'] == 'low':
                 final_strength = max(0, final_strength - 0.1)
-                print(f"⚠️ Лонг при медвежьем макрофоне: -0.1")
-            
-            if final_strength != original_strength:
-                print(f"🔄 Сила сигнала скорректирована: {original_strength:.2f} → {final_strength:.2f}")
 
-        # Порог силы сигнала 0.35 (после корректировки)
         if final_signal and final_strength >= 0.35:
             base = symbol.split('/')[0]
             cg = self.fetch_coinglass_data(base)
             news = self.fetch_cryptopanic_news()
 
             if not self.get_ai_filter(symbol, df, final_signal, ob, cg, news):
-                print(f"[{datetime.now(timezone.utc)}] AI отклонил сигнал {final_signal} для {symbol}")
                 return None, None, None
 
             entry = last['close']
             fee_adj = entry * self.taker_fee
             atr = last['atr']
+            
             if final_signal == 'LONG':
                 sl = entry - (self.sl_atr_multiplier * atr) - fee_adj
                 tp = entry + (self.tp_atr_multiplier * atr) + fee_adj
@@ -876,13 +1057,23 @@ Reply with ONLY "YES" or "NO"."""
                 sl = entry + (self.sl_atr_multiplier * atr) + fee_adj
                 tp = entry - (self.tp_atr_multiplier * atr) - fee_adj
 
-            print(f"[{datetime.now(timezone.utc)}] СИГНАЛ! {final_signal} (сила {final_strength:.2f}) для {symbol}")
-            return final_signal, "Scalp", {'entry': entry, 'stop_loss': sl, 'take_profit': tp}
+            # Увеличиваем счетчик сделок в сессии
+            self.session_trades[session_info['key']] = self.session_trades.get(session_info['key'], 0) + 1
 
-        print(f"[{datetime.now(timezone.utc)}] Нет сильного сигнала (сила {final_strength:.2f}) для {symbol}")
+            print(f"[{now}] 🎯 СИГНАЛ! {final_signal} (сила {final_strength:.2f}) для {symbol}")
+            print(f"    Сессия: {session_info['name']}, Уровни: +{level_boost:.2f}")
+            
+            return final_signal, "Scalp", {
+                'entry': entry, 
+                'stop_loss': sl, 
+                'take_profit': tp,
+                'level_boost': level_boost,
+                'session': session_info['name']
+            }
+
         return None, None, None
 
-    def log_trade(self, symbol, side, entry, exit_price, size, pnl, pnl_pct, df_last, hold_time):
+    def log_trade(self, symbol, side, entry, exit_price, size, pnl, pnl_pct, df_last, hold_time, session, level_boost):
         timestamp = datetime.now(timezone.utc).isoformat()
         hold_minutes = hold_time.total_seconds() / 60 if hold_time else 0
         row = [
@@ -890,69 +1081,49 @@ Reply with ONLY "YES" or "NO"."""
             df_last['rsi'], df_last['adx'], df_last['vwap'], df_last['ema_20'], df_last['ema_50'],
             df_last['atr'], df_last['bb_upper'], df_last['bb_lower'],
             df_last['stoch_k'], df_last['stoch_d'], df_last['macd_hist'], df_last.get('bid_ratio', 50),
-            round(hold_minutes, 1)
+            round(hold_minutes, 1), session, level_boost
         ]
         with open(self.trade_log_file, 'a', newline='') as f:
             writer = csv.writer(f)
             writer.writerow(row)
-        print(f"[{timestamp}] Сделка записана в {self.trade_log_file}")
 
     def get_balance(self):
         try:
             bal = self.exchange.fetch_balance()
             if 'info' in bal and 'result' in bal['info'] and 'list' in bal['info']['result']:
                 equity = float(bal['info']['result']['list'][0]['totalEquity'])
-                print(f"[{datetime.now(timezone.utc)}] Баланс: totalEquity = {equity:.2f} USDT")
                 return equity
             elif 'USDT' in bal and 'free' in bal['USDT']:
-                usdt_free = float(bal['USDT']['free'])
-                print(f"[{datetime.now(timezone.utc)}] USDT free balance: {usdt_free}")
-                return usdt_free
+                return float(bal['USDT']['free'])
             else:
-                print(f"[{datetime.now(timezone.utc)}] USDT не найден в ответе баланса")
                 return 100.0
         except Exception as e:
-            print(f"[{datetime.now(timezone.utc)}] BALANCE FETCH FAILED: {str(e)}")
             return 100.0
 
     def place_order(self, symbol, signal, params):
         try:
             balance = self.get_balance()
             
-            # Проверка минимального баланса
             if balance < self.min_balance_for_trading:
-                print(f"[{datetime.now(timezone.utc)}] Баланс {balance:.2f} ниже минимального {self.min_balance_for_trading}")
-                self.send_telegram(f"⚠️ Баланс {balance:.2f} ниже минимального. Торговля приостановлена.")
+                print(f"Баланс {balance:.2f} ниже минимального")
                 return
             
-            # Динамический риск в зависимости от баланса
-            if balance < 200:
-                risk_pct = 0.005  # 0.5% при малом балансе
-            else:
-                risk_pct = 0.01    # 1% при нормальном балансе
-                
+            risk_pct = 0.005 if balance < 200 else 0.01
             risk = balance * risk_pct
             size = risk / abs(params['entry'] - params['stop_loss'])
             
-            # Минимальные размеры для Bybit
-            min_sizes = {
-                'BTC/USDT:USDT': 0.001,
-                'ETH/USDT:USDT': 0.01
-            }
+            min_sizes = {'BTC/USDT:USDT': 0.001, 'ETH/USDT:USDT': 0.01}
             
             if symbol.startswith('BTC'):
                 size = round(size, 3)
                 if size < min_sizes[symbol]:
-                    print(f"Размер {size} меньше минимального {min_sizes[symbol]}, используем минимум")
                     size = min_sizes[symbol]
             else:
                 size = round(size, 2)
                 if size < min_sizes[symbol]:
-                    print(f"Размер {size} меньше минимального {min_sizes[symbol]}, используем минимум")
                     size = min_sizes[symbol]
 
             if size <= 0:
-                print(f"[{datetime.now(timezone.utc)}] Размер позиции слишком мал: {size}")
                 return
 
             msg = (
@@ -961,7 +1132,8 @@ Reply with ONLY "YES" or "NO"."""
                 f"SL: {params['stop_loss']:.2f}\n"
                 f"TP: {params['take_profit']:.2f}\n"
                 f"Размер: {size}\n"
-                f"Риск: {risk_pct*100:.1f}%"
+                f"Сессия: {params.get('session', 'N/A')}\n"
+                f"Уровни: +{params.get('level_boost', 0):.2f}"
             )
             self.send_telegram(msg)
 
@@ -971,23 +1143,24 @@ Reply with ONLY "YES" or "NO"."""
                 order = self.exchange.create_market_sell_order(symbol, size)
 
             actual_entry = order.get('average') or params['entry']
-            params['entry'] = actual_entry
 
             self.positions[symbol] = {
                 'side': signal,
-                'entry': params['entry'],
+                'entry': actual_entry,
                 'stop_loss': params['stop_loss'],
                 'take_profit': params['take_profit'],
                 'size': size,
                 'open_time': datetime.now(timezone.utc),
                 'breakeven_activated': False,
-                'trailing_activated': False
+                'trailing_activated': False,
+                'level_boost': params.get('level_boost', 0),
+                'session': params.get('session', 'N/A')
             }
-            print(f"[{datetime.now(timezone.utc)}] Order placed: {signal} {size} for {symbol}")
-            self.send_telegram(f"✅ Ордер исполнен: {signal} {size} {symbol} по {actual_entry:.2f}")
+            
+            print(f"Order placed: {signal} {size} for {symbol}")
 
         except Exception as e:
-            print(f"[{datetime.now(timezone.utc)}] Order error for {symbol}: {e}")
+            print(f"Order error: {e}")
             self.send_telegram(f"❌ Ошибка ордера {symbol}: {str(e)[:100]}")
 
     def manage_position(self, symbol, df):
@@ -1001,7 +1174,6 @@ Reply with ONLY "YES" or "NO"."""
         sl = pos['stop_loss']
         tp = pos['take_profit']
         
-        # Проверка времени удержания
         hold_time = datetime.now(timezone.utc) - pos['open_time']
         
         if side == 'LONG':
@@ -1009,54 +1181,42 @@ Reply with ONLY "YES" or "NO"."""
         else:
             pnl_pct = ((entry - curr) / entry) * 100
         
-        # 1. Временной стоп (если позиция висит слишком долго)
+        # Временной стоп
         if hold_time > self.max_hold_time:
-            print(f"⏰ Время вышло! Позиция {symbol} держится {hold_time}")
-            
             if pnl_pct > 0:
-                # Если в плюсе - закрываем
-                self.close_position(symbol, curr, 'Time Exit (Profit)', df, hold_time)
+                self.close_position(symbol, curr, 'Time Exit (Profit)', df, hold_time, pos)
             elif pnl_pct < -0.1:
-                # Если в небольшом минусе - тоже закрываем (лучше, чем SL)
-                self.close_position(symbol, curr, 'Time Exit (Stop)', df, hold_time)
+                self.close_position(symbol, curr, 'Time Exit (Stop)', df, hold_time, pos)
             else:
-                # Если около нуля - уменьшаем TP и ждем еще немного
                 pos['take_profit'] = entry * (1 + (tp/entry - 1) * 0.7)
-                print(f"🎯 TP уменьшен из-за времени: {pos['take_profit']:.2f}")
             return
         
-        # 2. Динамический трейлинг-стоп
+        # Безубыток
         if pnl_pct > self.min_profit_for_breakeven and not pos.get('breakeven_activated'):
-            pos['stop_loss'] = entry  # Безубыток
+            pos['stop_loss'] = entry
             pos['breakeven_activated'] = True
-            self.send_telegram(f'🔒 {symbol} в безубытке')
         
+        # Трейлинг
         if pnl_pct > self.trailing_activation and not pos.get('trailing_activated'):
             pos['trailing_activated'] = True
-            self.send_telegram(f'🔝 {symbol} трейлинг активирован')
         
         if pos.get('trailing_activated'):
             if side == 'LONG':
                 new_sl = curr * (1 - self.trailing_distance / 100)
                 if new_sl > pos['stop_loss']:
                     pos['stop_loss'] = new_sl
-                    print(f"🔝 Трейлинг стоп поднят до {new_sl:.2f}")
             else:
                 new_sl = curr * (1 + self.trailing_distance / 100)
                 if new_sl < pos['stop_loss']:
                     pos['stop_loss'] = new_sl
-                    print(f"🔝 Трейлинг стоп опущен до {new_sl:.2f}")
         
-        # 3. Стандартные проверки SL/TP
+        # SL/TP
         if (side == 'LONG' and curr <= sl) or (side == 'SHORT' and curr >= sl):
-            self.close_position(symbol, curr, 'SL Hit', df, hold_time)
+            self.close_position(symbol, curr, 'SL Hit', df, hold_time, pos)
         elif (side == 'LONG' and curr >= tp) or (side == 'SHORT' and curr <= tp):
-            self.close_position(symbol, curr, 'TP Hit', df, hold_time)
+            self.close_position(symbol, curr, 'TP Hit', df, hold_time, pos)
 
-        print(f"[{datetime.now(timezone.utc)}] Position checked for {symbol}, PNL %: {pnl_pct:.2f}, hold time: {hold_time}")
-
-    def close_position(self, symbol, price, reason, df, hold_time):
-        pos = self.positions.get(symbol)
+    def close_position(self, symbol, price, reason, df, hold_time, pos):
         if not pos:
             return
 
@@ -1067,8 +1227,12 @@ Reply with ONLY "YES" or "NO"."""
             pnl = (pos['entry'] - price) * pos['size']
             pnl_pct = ((pos['entry'] - price) / pos['entry']) * 100
 
-        # Логируем сделку
-        self.log_trade(symbol, pos['side'], pos['entry'], price, pos['size'], pnl, pnl_pct, df.iloc[-1], hold_time)
+        # Логируем
+        self.log_trade(
+            symbol, pos['side'], pos['entry'], price, pos['size'], 
+            pnl, pnl_pct, df.iloc[-1], hold_time,
+            pos.get('session', 'N/A'), pos.get('level_boost', 0)
+        )
 
         try:
             if pos['side'] == 'LONG':
@@ -1079,44 +1243,47 @@ Reply with ONLY "YES" or "NO"."""
             msg = (
                 f"🔴 *Закрыта {symbol}*\n"
                 f"Причина: {reason}\n"
-                f"Время удержания: {hold_time}\n"
+                f"Время: {hold_time}\n"
                 f"P&L: ${pnl:.2f} ({pnl_pct:.2f}%)"
             )
             self.send_telegram(msg)
-            print(f"[{datetime.now(timezone.utc)}] Position closed for {symbol}: {reason}, P&L: ${pnl:.2f}")
         except Exception as e:
-            print(f"[{datetime.now(timezone.utc)}] Close order error for {symbol}: {e}")
-            self.send_telegram(f"❌ Ошибка закрытия {symbol}: {str(e)[:100]}")
+            print(f"Close error: {e}")
 
         self.positions[symbol] = None
 
     def run(self):
         while True:
-            print(f"[{datetime.now(timezone.utc)}] Starting new cycle")
-            self.check_daily_loss_limit()
-            self.get_balance()
-            
-            # Обновляем макроэкономику (раз в день)
-            self.update_macro_context()
-            
-            for symbol in self.symbols:
-                try:
-                    df = self.fetch_ohlcv(symbol)
-                    if df is None:
-                        print(f"[{datetime.now(timezone.utc)}] Skipping {symbol} - no data")
-                        continue
-                    df = self.calculate_indicators(df)
+            try:
+                print(f"[{datetime.now(timezone.utc)}] Starting new cycle")
+                self.check_daily_loss_limit()
+                self.get_balance()
+                
+                self.update_session()
+                self.update_macro_context()
+                
+                for symbol in self.symbols:
+                    try:
+                        df = self.fetch_ohlcv(symbol)
+                        if df is None:
+                            continue
+                        df = self.calculate_indicators(df)
 
-                    if self.positions.get(symbol):
-                        self.manage_position(symbol, df)
-                    else:
-                        signal, s_type, params = self.detect_signal(symbol, df)
-                        if signal:
-                            self.place_order(symbol, signal, params)
-                except Exception as e:
-                    print(f"[{datetime.now(timezone.utc)}] Error for {symbol}: {e}")
-            print(f"[{datetime.now(timezone.utc)}] Cycle finished, sleeping 30s")
-            time.sleep(30)
+                        if self.positions.get(symbol):
+                            self.manage_position(symbol, df)
+                        else:
+                            signal, s_type, params = self.detect_signal(symbol, df)
+                            if signal:
+                                self.place_order(symbol, signal, params)
+                    except Exception as e:
+                        print(f"Error for {symbol}: {e}")
+                
+                print(f"Cycle finished, sleeping 30s")
+                time.sleep(30)
+                
+            except Exception as e:
+                print(f"Critical error in main loop: {e}")
+                time.sleep(60)
 
 
 if __name__ == "__main__":
